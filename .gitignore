@@ -1,0 +1,29 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# Compiled objects & binaries
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+*.exe
+cluster_transport
+cluster_transport_tests
+
+# Python & Matplotlib caches
+__pycache__/
+*.pyc
+.mpl_cache/
+
+# Simulation scratch dumps
+dumps/
+*.bin
+*.csv
+
+# OS & editor metadata
+.DS_Store
+.vscode/
+.idea/

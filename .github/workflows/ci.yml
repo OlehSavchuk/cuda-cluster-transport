@@ -1,0 +1,27 @@
+name: Build & Physics Verification Suite
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  verify-transport:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build transport engine & test suite
+        run: cmake --build build -j 4
+
+      - name: Run physics & stochastic Boltzmann verification suite
+        run: ctest --test-dir build --output-on-failure -V
