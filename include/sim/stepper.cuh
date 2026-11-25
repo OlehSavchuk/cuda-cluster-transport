@@ -8,6 +8,7 @@
 #include "physics/cross_sections.cuh"
 #include "physics/inelastic_channels.cuh"
 #include "physics/kinematics.cuh"
+#include "physics/mean_field.cuh"
 #include "physics/resonances.cuh"
 #include "sim/grid.cuh"
 #include "sim/particles.cuh"
@@ -587,11 +588,20 @@ public:
         d_max_prob_.zero();
     }
 
-    // Time-reversal symmetric Strang-split step:
-    //   Drift(dt/2) -> Decay(dt/2) -> Bin -> Collide(dt) -> Decay(dt/2) -> Drift(dt/2) -> Compact
-    void step(ParticleSystem& particles, SpatialGrid& grid) {
+    // Time-reversal symmetric Vlasov-BUU Velocity-Verlet + Strang-split collision step:
+    //   Kick(dt/2) -> Drift(dt/2) -> Decay(dt/2) -> Collide(dt) -> Decay(dt/2) -> Drift(dt/2) -> Kick(dt/2)
+    void step(ParticleSystem& particles, SpatialGrid& grid, MeanFieldGrid* mf = nullptr) {
         const double half_dt = 0.5 * step_cfg_.dt_fm;
-        drift(particles, grid.config(), half_dt);
+        const bool use_mf = (mf != nullptr && mf->config().enabled);
+
+        if (use_mf) {
+            mf->rebuild_potentials(particles, step_cfg_.n_test);
+            mf->kick(particles, half_dt);
+            mf->drift(particles, half_dt);
+        } else {
+            drift(particles, grid.config(), half_dt);
+        }
+
         if (rxn_cfg_.enable_resonance_2to1_and_decays) {
             decay_resonances(particles, half_dt, step_index_ * 2ULL);
         }
@@ -600,7 +610,16 @@ public:
         if (rxn_cfg_.enable_resonance_2to1_and_decays) {
             decay_resonances(particles, half_dt, step_index_ * 2ULL + 1ULL);
         }
-        drift(particles, grid.config(), half_dt);
+
+        if (use_mf) {
+            mf->rebuild_potentials(particles, step_cfg_.n_test);
+            mf->drift(particles, half_dt);
+            mf->rebuild_potentials(particles, step_cfg_.n_test);
+            mf->kick(particles, half_dt);
+        } else {
+            drift(particles, grid.config(), half_dt);
+        }
+
         particles.compact_if_fragmented();
         ++step_index_;
     }

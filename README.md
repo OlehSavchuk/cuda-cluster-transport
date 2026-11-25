@@ -1,18 +1,32 @@
 # CUDA Relativistic Nucleon & Light-Cluster Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-10%2F10%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-11%2F11%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A GPU-native relativistic Boltzmann transport code written in **CUDA C++17** for **protons, neutrons, and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **off-shell relativistic Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay, 46 reversible $2 \leftrightarrow 2$ inelastic nuclear transfer/catalysis/excitation channels with strict detailed balance, and Glauber elastic scattering**.
+A GPU-native relativistic Vlasov–Boltzmann (BUU) transport code written in **CUDA C++17** for **protons, neutrons, and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), off-shell Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay, 46 reversible $2 \leftrightarrow 2$ inelastic nuclear channels with strict detailed balance, and Glauber elastic scattering**.
 
-When `nvcc` is present, all particle propagation, dynamic slot allocation/compaction, 3D spatial grid binning, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic reaction/decay kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
+When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaussian smearing, dynamic slot compaction, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic reaction/decay kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
 
 ---
 
 ## Visual Demonstrations
 
-### 1. Sub-Saturation Cluster Nucleation at $\rho_B = n_0 / 8$, $T_{\text{start}} = 20\;\text{MeV}$
+### 1. Spinodal Liquid–Gas Phase Separation & Cluster Droplets (`--eos md-soft` vs `--eos none`)
+Inside the sub-saturation nuclear spinodal zone ($\rho_B \approx 0.27\,\rho_0$, $T_0 = 6\;\text{MeV}$), a free cascade stays spatially uniform whereas the **Skyrme + Lorentzian Momentum-Dependent mean field** ($K_0 = 215\;\text{MeV}$, $m^*(p_F)/m = 0.69$) spontaneously amplifies Poisson density fluctuations into self-bound liquid nuclear droplets enriched with $d, t, {}^3\text{He}, {}^4\text{He}$, and ${}^4\text{He}^*$:
+
+<p align="center">
+  <img src="assets/spinodal_meanfield_vs_free.gif" alt="Spinodal Clumping MD-Skyrme vs Free Cascade" width="100%">
+</p>
+
+### 2. Nuclear Matter EOS & Momentum-Dependent Optical Potential (`--dump-eos`)
+Exact saturation ($\rho_0 = 0.16\;\text{fm}^{-3}$, $E/A = -16.0\;\text{MeV}$, $P(\rho_0)=0$) across `Skyrme-Soft` ($K_0=200$), `MD-Soft` ($K_0=215$), and `MD-Stiff` ($K_0=380\;\text{MeV}$), alongside the single-nucleon optical potential $U_N(\rho_0, p)$ ($U(0) = -72.2\;\text{MeV}$, crossing zero at $p \approx 0.78\;\text{GeV}/c$ / $T_{\text{kin}} \approx 285\;\text{MeV}$):
+
+<p align="center">
+  <img src="assets/eos_and_optical_potential.png" alt="Skyrme + Momentum-Dependent EOS and Optical Potential" width="100%">
+</p>
+
+### 3. Sub-Saturation Cluster Nucleation at $\rho_B = n_0 / 8$, $T_{\text{start}} = 20\;\text{MeV}$
 Starting from **100% pure protons and neutrons** at nuclear sub-saturation density $\rho_B = n_0 / 8 = 0.02\;\text{fm}^{-3}$ ($L = 30\;\text{fm}, N_{\text{test}} = 60$, zero probability overflows) and $T_{\text{start}} = 20.0\;\text{MeV}$, nearly **45% of all baryons** assemble into bound and resonant clusters ($d, d^*, t, {}^3\text{He}, {}^4\text{He}, {}^4\text{He}^*$)—exhibiting a BBN-like transient deuteron overshoot before converging onto the dashed analytical Saha / SHM equilibrium targets while self-heating the isolated box via cluster formation:
 
 <p align="center">
@@ -153,14 +167,18 @@ ctest --test-dir build --output-on-failure -V
 # Dynamic nucleosynthesis of d, d*, t, 3He, 4He, and 4He* from pure p + n
 ./build/cluster_transport --mode nucleosynthesis --npart 30000 --ntest 15 --steps 80 --dt 0.15
 
-# Run in pure elastic baseline mode (--reactions elastic) or full inelastic+BW mode (--reactions all)
-./build/cluster_transport --mode aniso --reactions all --npart 100000 --ntest 25 --steps 100 --dt 0.20
-./build/cluster_transport --mode fireball --reactions all --npart 100000 --ntest 25 --steps 80 --dt 0.25
+# Spinodal clumping + cluster nucleation with MD-Soft Skyrme + Momentum-Dependent potential
+./build/cluster_transport --mode nucleosynthesis --eos md-soft --npart 30000 --ntest 30 --temp 8.0 --steps 250 --dt 0.40
+
+# Compare Soft (K0 = 215 MeV) vs Stiff (K0 = 380 MeV) MD-Skyrme in expanding fireball
+./build/cluster_transport --mode fireball --eos md-stiff --reactions all --npart 100000 --ntest 25 --steps 80 --dt 0.25
 ```
 
 ### 4. Regenerate Animations & Figures
 Requires `python3` (`numpy`, `matplotlib`) and `ffmpeg`:
 ```bash
+python3 scripts/generate_meanfield_animations.py
+python3 scripts/generate_n0_over_8_nucleation.py
 python3 scripts/generate_inelastic_animations.py
 python3 scripts/generate_animations.py
 ```
@@ -179,9 +197,12 @@ python3 scripts/generate_animations.py
 7. **`test_detailed_balance_full_chemical_network`**: Verifies chemical stationarity across all 28 species with all $2 \leftrightarrow 1$ and 46 $2 \leftrightarrow 2$ reactions simultaneously active.
 8. **`test_dynamic_cluster_nucleosynthesis`**: Verifies spontaneous nucleation of $d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and ${}^4\text{He}^*$ from pure $p+n$ with $|\Delta E|/E \sim 10^{-15}$.
 9. **`test_reactive_expanding_fireball`**: Radial Hubble expansion with coupled elastic, inelastic, and resonance decay dynamics.
+10. **`test_eos_saturation_and_md`**: Verifies exact cold-matter saturation ($E/A(\rho_0) = -16.00\;\text{MeV}$, $P(\rho_0)=0$, $K_0 = 200/215/380\;\text{MeV}$), optical-potential zero crossing ($U(0)=-72.2\;\text{MeV} \to U(1\;\text{GeV}/c)=+10.7\;\text{MeV}$), and Landau effective mass $m^*(p_F)/m = 0.692$.
+11. **`test_vlasov_and_spinodal`**: Verifies symplectic Velocity-Verlet Hamiltonian conservation ($|\Delta H|/H < 10^{-3}$), exact CIC lattice momentum conservation ($|\Delta\vec{P}| \sim 10^{-13}\;\text{GeV}/c$), and spinodal density-contrast amplification.
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA
 - [x] Relativistic Breit–Wigner spectral functions and $2 \leftrightarrow 1$ resonance formation/decay ($d^* \leftrightarrow N+N$, ${}^4\text{He}^* \leftrightarrow p+t / n+{}^3\text{He} / d+d$, ${}^4\text{H}^* \leftrightarrow n+t$, ${}^4\text{Li}^* \leftrightarrow p+{}^3\text{He}$)
 - [x] Reversible $2 \leftrightarrow 2$ nuclear transfer ($dd \leftrightarrow pt/n\,{}^3\text{He}$, $dt \leftrightarrow n\alpha$, $d\,{}^3\text{He} \leftrightarrow p\alpha$), deuteron catalysis ($N+d \leftrightarrow N+d^*$), and ${}^4\text{He} \leftrightarrow {}^4\text{He}^*$ excitation with off-shell detailed balance
-- [ ] Direct multi-pion & 3-body $2 \leftrightarrow 3$ channels ($\pi + d \leftrightarrow \pi + p + n$, $N + N + N \leftrightarrow N + d$) and nuclear mean-field potentials
+- [x] Skyrme + Lorentzian momentum-dependent mean-field potential (`SkyrmeSoft`, `MDSoft`, `MDStiff`) with baryon/isospin-additive cluster folding and symplectic CIC Vlasov kernels
+- [ ] GPU 6D phase-space Pauli blocking $(1 - f_3)(1 - f_4)$ & Bose enhancement + direct $2 \leftrightarrow 3$ channels

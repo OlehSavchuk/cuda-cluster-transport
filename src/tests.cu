@@ -9,6 +9,7 @@
 #include "physics/cross_sections.cuh"
 #include "physics/inelastic_channels.cuh"
 #include "physics/kinematics.cuh"
+#include "physics/mean_field.cuh"
 #include "physics/resonances.cuh"
 #include "physics/species.cuh"
 #include "sim/grid.cuh"
@@ -517,6 +518,142 @@ void test_reactive_expanding_fireball() {
                 st.collisions_inelastic_2to2, st.formations_2to1, st.decays_1to2);
 }
 
+void test_eos_saturation_and_momentum_dependence() {
+    for (EOSPreset preset : {EOSPreset::SkyrmeSoft, EOSPreset::MDSoft, EOSPreset::MDStiff}) {
+        const MeanFieldConfig cfg = make_mean_field_config(preset);
+        constexpr double h = 1.0e-4;
+        const double e0 = cold_eos_energy_per_nucleon_gev(1.0, cfg);
+        const double ep = cold_eos_energy_per_nucleon_gev(1.0 + h, cfg);
+        const double em = cold_eos_energy_per_nucleon_gev(1.0 - h, cfg);
+        const double de = (ep - em) / (2.0 * h);
+        const double K0_num_mev = 9.0 * ((ep - 2.0 * e0 + em) / (h * h)) * 1.0e3;
+
+        TEST_ASSERT(std::fabs(e0 * 1.0e3 - (-16.0)) < 1.0e-5,
+                    "EOS saturation binding energy E/A(rho0) != -16.0 MeV");
+        TEST_ASSERT(std::fabs(de) < 1.0e-7,
+                    "EOS saturation pressure d(E/A)/du(1) != 0");
+        TEST_ASSERT(std::fabs(K0_num_mev - cfg.K0_mev) < 0.05,
+                    "EOS incompressibility K_0 mismatch at rho_0");
+    }
+
+    // Check momentum-dependent repulsive rise of U_N(rho_0, p) and effective mass m*(p_F)/m < 0.75
+    const MeanFieldConfig md = make_mean_field_config(EOSPreset::MDSoft);
+    double alpha1 = 1.0, da = 0.0, d2a = 0.0;
+    cold_fermi_md_factors(1.0, md.rho0_fm3, md.Lambda_md_gev, alpha1, da, d2a);
+    const double u_p0 = (md.A_sk_gev + md.B_sk_gev + 0.5 * md.C_md_gev * (alpha1 + 1.0)) * 1.0e3;
+    const double u_p1 = (md.A_sk_gev + md.B_sk_gev +
+                         0.5 * md.C_md_gev * (alpha1 + 1.0 / (1.0 + 1.0 / (md.Lambda_md_gev * md.Lambda_md_gev)))) * 1.0e3;
+    TEST_ASSERT(u_p0 < -60.0 && u_p1 > 0.0,
+                "MD optical potential failed to transition from attractive (p=0) to repulsive (p=1 GeV/c)");
+
+    const double pF = phys::HBARC * std::cbrt(1.5 * phys::PI * phys::PI * md.rho0_fm3);
+    const double denom = 1.0 + (pF * pF) / (md.Lambda_md_gev * md.Lambda_md_gev);
+    const double inv_mstar_ratio =
+        1.0 - (phys::MASS_NUCLEON_AVG * md.C_md_gev) / (md.Lambda_md_gev * md.Lambda_md_gev * denom * denom);
+    const double mstar_over_m = 1.0 / inv_mstar_ratio;
+    TEST_ASSERT(mstar_over_m > 0.65 && mstar_over_m < 0.75,
+                "Expected Landau effective mass m*(p_F)/m ~ 0.70 for MDSoft");
+
+    std::printf("[PASS] test_eos_saturation_and_md (E/A=-16.00 MeV, K0=215/380 MeV, U(0)=%.1f->U(1GeV)=+%.1f MeV, m*/m=%.3f)\n",
+                u_p0, u_p1, mstar_over_m);
+}
+
+void test_vlasov_meanfield_conservation_and_spinodal() {
+    // 1. Vlasov droplet test: inhomogeneous nuclear+cluster cloud in periodic box under MDSoft
+    GridConfig gcfg{};
+    gcfg.boundary = BoundaryMode::PeriodicBox;
+    gcfg.nx = 12; gcfg.ny = 12; gcfg.nz = 12;
+    gcfg.xmin = -12.0; gcfg.xmax = 12.0;
+    gcfg.ymin = -12.0; gcfg.ymax = 12.0;
+    gcfg.zmin = -12.0; gcfg.zmax = 12.0;
+
+    MixtureConfig mix{};
+    mix.cluster_yield_boost = 3.0;
+    mix.excited_yield_boost = 4.0;
+
+    auto host_p = init_expanding_fireball(12000, 5.2, /*beta_s=*/0.05, 0.015, 0.860, -0.005, mix, 555ULL);
+    ParticleSystem particles;
+    particles.upload(host_p);
+
+    SpatialGrid grid(gcfg);
+    MeanFieldGrid mf(make_mean_field_config(EOSPreset::MDSoft), gcfg);
+    CrossSectionConfig xs_cfg{};
+    StepperConfig step_cfg{};
+    step_cfg.dt_fm = 0.20;
+    step_cfg.n_test = 150;
+
+    ReactionConfig rxn_cfg{};
+    rxn_cfg.enable_elastic = false;
+    rxn_cfg.enable_inelastic_2to2 = false;
+    rxn_cfg.enable_resonance_2to1_and_decays = false;
+
+    TransportStepper stepper(step_cfg, xs_cfg, rxn_cfg);
+    ObservableCalculator obs_calc;
+
+    mf.rebuild_potentials(particles, step_cfg.n_test);
+    const GlobalObservables obs0 = obs_calc.compute(particles);
+    const double epot0 = mf.compute_potential_energy_test_gev(step_cfg.n_test);
+    const double H0 = obs0.E_tot + epot0;
+
+    for (int s = 0; s < 40; ++s) {
+        stepper.step(particles, grid, &mf);
+    }
+
+    mf.rebuild_potentials(particles, step_cfg.n_test);
+    const GlobalObservables obs1 = obs_calc.compute(particles);
+    const double epot1 = mf.compute_potential_energy_test_gev(step_cfg.n_test);
+    const double H1 = obs1.E_tot + epot1;
+
+    const double dP = std::sqrt(
+        (obs1.Px_tot - obs0.Px_tot) * (obs1.Px_tot - obs0.Px_tot) +
+        (obs1.Py_tot - obs0.Py_tot) * (obs1.Py_tot - obs0.Py_tot) +
+        (obs1.Pz_tot - obs0.Pz_tot) * (obs1.Pz_tot - obs0.Pz_tot));
+    const double rel_dH = std::fabs(H1 - H0) / H0;
+
+    TEST_ASSERT(dP < 1.0e-11, "Total 3-momentum conservation violated on CIC Vlasov lattice");
+    TEST_ASSERT(rel_dH < 1.0e-3, "Symplectic Vlasov Hamiltonian drift exceeded tolerance");
+
+    // 2. Spinodal liquid-gas clumping check at rho_B = n_0/5 (0.032 fm^-3), T = 6 MeV (with seeded mode)
+    GridConfig sp_grid{};
+    sp_grid.boundary = BoundaryMode::PeriodicBox;
+    sp_grid.nx = 10; sp_grid.ny = 10; sp_grid.nz = 10;
+    sp_grid.xmin = 0.0; sp_grid.xmax = 20.0;
+    sp_grid.ymin = 0.0; sp_grid.ymax = 20.0;
+    sp_grid.zmin = 0.0; sp_grid.zmax = 20.0;
+
+    MixtureConfig nuc_only{};
+    nuc_only.include_ground_clusters = false;
+    nuc_only.include_excited_dstar = false;
+    nuc_only.include_excited_he4 = false;
+    auto sp_init = init_box_ensemble(12800, sp_grid, 0.004, 0.004, 0.900, 0.0, nuc_only, 909ULL);
+    for (auto& hp : sp_init) {
+        // Seed Chomaz-Colonna lambda = 10 fm (m = 2) spinodal mode across x and y
+        hp.x = detail::wrap_periodic(hp.x + 0.55 * std::sin(2.0 * phys::TWO_PI * hp.x / 20.0), 0.0, 20.0);
+        hp.y = detail::wrap_periodic(hp.y + 0.55 * std::sin(2.0 * phys::TWO_PI * hp.y / 20.0), 0.0, 20.0);
+    }
+
+    auto run_contrast = [&](EOSPreset pset) {
+        ParticleSystem ps; ps.upload(sp_init);
+        SpatialGrid sg(sp_grid);
+        MeanFieldGrid mfg(make_mean_field_config(pset != EOSPreset::None ? pset : EOSPreset::MDSoft), sp_grid);
+        StepperConfig sc{}; sc.dt_fm = 0.50; sc.n_test = 30;  // rho_B = 0.33 * rho_0 (spinodal center!)
+        ReactionConfig rc{}; rc.enable_inelastic_2to2 = false; rc.enable_resonance_2to1_and_decays = false;
+        TransportStepper stp(sc, CrossSectionConfig{}, rc);
+        for (int s = 0; s < 75; ++s) {
+            stp.step(ps, sg, (pset != EOSPreset::None) ? &mfg : nullptr);
+        }
+        mfg.rebuild_potentials(ps, sc.n_test);
+        return mfg.density_contrast_rms();
+    };
+
+    const double c_free = run_contrast(EOSPreset::None);
+    const double c_md = run_contrast(EOSPreset::MDSoft);
+    TEST_ASSERT(c_md > 1.8 * c_free, "Expected spinodal mean-field attraction to amplify density clumping");
+
+    std::printf("[PASS] test_vlasov_and_spinodal (|dP|=%.2e, |dH|/H=%.2e, spinodal contrast: free=%.3f vs MD=%.3f)\n",
+                dP, rel_dH, c_free, c_md);
+}
+
 }  // namespace
 
 int main() {
@@ -532,6 +669,8 @@ int main() {
     test_detailed_balance_full_chemical_network();
     test_dynamic_cluster_nucleosynthesis();
     test_reactive_expanding_fireball();
+    test_eos_saturation_and_momentum_dependence();
+    test_vlasov_meanfield_conservation_and_spinodal();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

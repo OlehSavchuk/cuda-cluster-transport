@@ -13,6 +13,7 @@
 #include "physics/cross_sections.cuh"
 #include "physics/inelastic_channels.cuh"
 #include "physics/kinematics.cuh"
+#include "physics/mean_field.cuh"
 #include "physics/resonances.cuh"
 #include "physics/species.cuh"
 #include "sim/grid.cuh"
@@ -189,6 +190,39 @@ void dump_breit_wigner_curves(const std::string& path) {
     }
 }
 
+void dump_eos_curves(const std::string& path) {
+    const MeanFieldConfig sk_soft = make_mean_field_config(EOSPreset::SkyrmeSoft);
+    const MeanFieldConfig md_soft = make_mean_field_config(EOSPreset::MDSoft);
+    const MeanFieldConfig md_stiff = make_mean_field_config(EOSPreset::MDStiff);
+
+    std::ofstream f(path);
+    f << "u_rho_over_rho0,ea_skyrme_soft_mev,ea_md_soft_mev,ea_md_stiff_mev,"
+         "p_gev,uopt_skyrme_soft_mev,uopt_md_soft_mev,uopt_md_stiff_mev\n";
+
+    double alpha1 = 1.0, da = 0.0, d2a = 0.0;
+    cold_fermi_md_factors(1.0, md_soft.rho0_fm3, md_soft.Lambda_md_gev, alpha1, da, d2a);
+
+    auto u_opt_rho0 = [&](const MeanFieldConfig& c, double p_gev) {
+        const double u_sk = c.A_sk_gev + c.B_sk_gev;
+        const double u_md = 0.5 * c.C_md_gev * (alpha1 + 1.0 / (1.0 + (p_gev * p_gev) / (c.Lambda_md_gev * c.Lambda_md_gev)));
+        return (u_sk + u_md) * 1.0e3;
+    };
+
+    constexpr int N_PTS = 200;
+    for (int i = 0; i < N_PTS; ++i) {
+        const double u = 0.02 + 3.48 * static_cast<double>(i) / (N_PTS - 1);
+        const double p_gev = 1.20 * static_cast<double>(i) / (N_PTS - 1);
+        f << u << ","
+          << cold_eos_energy_per_nucleon_gev(u, sk_soft) * 1.0e3 << ","
+          << cold_eos_energy_per_nucleon_gev(u, md_soft) * 1.0e3 << ","
+          << cold_eos_energy_per_nucleon_gev(u, md_stiff) * 1.0e3 << ","
+          << p_gev << ","
+          << u_opt_rho0(sk_soft, p_gev) << ","
+          << u_opt_rho0(md_soft, p_gev) << ","
+          << u_opt_rho0(md_stiff, p_gev) << "\n";
+    }
+}
+
 void print_species_catalog(const CrossSectionConfig& xs_cfg) {
     const SpectralNormTable norms = compute_spectral_norm_table();
     std::printf("\n=== Nucleon & Light-Cluster Species Catalog (A <= 4, Breit-Wigner Spectral Enabled) ===\n");
@@ -232,6 +266,8 @@ void print_usage(const char* prog) {
         "  --mode <aniso|box|fireball|slabs|nucleosynthesis>\n"
         "                                     Simulation scenario (default: nucleosynthesis)\n"
         "  --reactions <all|elastic>          Enable full inelastic+BW network or elastic only\n"
+        "  --eos <none|skyrme-soft|md-soft|md-stiff>\n"
+        "                                     Mean-field EOS + MD potential (default: none)\n"
         "  --inelastic-scale <float>          Scale factor on 2<->2 inelastic couplings (default: 1.0)\n"
         "  --npart <int>                      Initial test particles (default: 32000)\n"
         "  --ntest <int>                      Test-particle oversampling N_test (default: 20)\n"
@@ -253,6 +289,7 @@ void print_usage(const char* prog) {
         "  --dump-limit <int>                 Max particles saved per frame (default: 4000)\n"
         "  --dump-xs <csv_path>               Export elastic cross-section curves and exit\n"
         "  --dump-bw <csv_path>               Export Breit-Wigner spectral curves and exit\n"
+        "  --dump-eos <csv_path>              Export Skyrme + MD EOS & optical potential curves\n"
         "  --print-species                    Print full 28-species catalog and exit\n"
         "  --help                             Show this help message\n",
         prog);
@@ -265,6 +302,7 @@ int main(int argc, char** argv) {
 
     std::string mode = "nucleosynthesis";
     std::string rxn_mode = "all";
+    std::string eos_name = "none";
     double inelastic_scale = 1.0;
     int n_particles = 32000;
     int n_test = 20;
@@ -282,6 +320,7 @@ int main(int argc, char** argv) {
     int dump_limit = 4000;
     std::string dump_xs_path;
     std::string dump_bw_path;
+    std::string dump_eos_path;
     bool only_print_species = false;
 
     CrossSectionConfig xs_cfg{};
@@ -300,6 +339,8 @@ int main(int argc, char** argv) {
             mode = next_str();
         } else if (arg == "--reactions") {
             rxn_mode = next_str();
+        } else if (arg == "--eos") {
+            eos_name = next_str();
         } else if (arg == "--inelastic-scale") {
             inelastic_scale = std::stod(next_str());
         } else if (arg == "--npart") {
@@ -348,6 +389,8 @@ int main(int argc, char** argv) {
             dump_xs_path = next_str();
         } else if (arg == "--dump-bw") {
             dump_bw_path = next_str();
+        } else if (arg == "--dump-eos") {
+            dump_eos_path = next_str();
         } else if (arg == "--print-species") {
             only_print_species = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -372,6 +415,16 @@ int main(int argc, char** argv) {
         dump_breit_wigner_curves(dump_bw_path);
         return 0;
     }
+    if (!dump_eos_path.empty()) {
+        dump_eos_curves(dump_eos_path);
+        return 0;
+    }
+
+    EOSPreset eos_preset = EOSPreset::None;
+    if (eos_name == "skyrme-soft") eos_preset = EOSPreset::SkyrmeSoft;
+    else if (eos_name == "md-soft") eos_preset = EOSPreset::MDSoft;
+    else if (eos_name == "md-stiff") eos_preset = EOSPreset::MDStiff;
+    const MeanFieldConfig mf_cfg = make_mean_field_config(eos_preset);
 
     step_cfg.dt_fm = dt_fm;
     step_cfg.n_test = n_test;
@@ -447,10 +500,11 @@ int main(int argc, char** argv) {
     std::printf(" CUDA Relativistic Nucleon & Cluster Transport (Elastic + Inelastic + Breit-Wigner)\n");
     std::printf("=======================================================================================\n");
     std::printf(" Backend        : %s\n", backend_description().c_str());
-    std::printf(" Scenario       : %s (%s) | Reactions: %s\n",
+    std::printf(" Scenario       : %s (%s) | EOS: %s | Reactions: %s\n",
                 mode.c_str(),
                 (gcfg.boundary == BoundaryMode::PeriodicBox) ? "3D Periodic Box" : "Open Expanding",
-                rxn_cfg.enable_inelastic_2to2 ? "Elastic + 2<->2 Inelastic + 2<->1 BW Resonances" : "Elastic Only");
+                eos_name.c_str(),
+                rxn_cfg.enable_inelastic_2to2 ? "Elastic + Inelastic + BW" : "Elastic Only");
     std::printf(" Initial N_part : %d test particles (N_test = %d)\n", n_particles, n_test);
     std::printf(" Grid           : %dx%dx%d = %d cells, dV = %.3f fm^3\n",
                 gcfg.nx, gcfg.ny, gcfg.nz, gcfg.num_cells(), gcfg.cell_volume_fm3());
@@ -467,15 +521,19 @@ int main(int argc, char** argv) {
     particles.upload(host_init);
 
     SpatialGrid grid(gcfg);
+    MeanFieldGrid mean_field(mf_cfg, gcfg);
+    mean_field.rebuild_potentials(particles, n_test);
     TransportStepper stepper(step_cfg, xs_cfg, rxn_cfg);
     ObservableCalculator obs_calc;
 
     const GlobalObservables obs0 = obs_calc.compute(particles);
+    const double E_pot0 = mean_field.compute_potential_energy_test_gev(n_test);
+    const double H_tot0 = obs0.E_tot + E_pot0;
 
     std::ofstream csv;
     if (!csv_path.empty()) {
         csv.open(csv_path);
-        csv << "step,t_fm,n_active,E_tot_gev,Pz_over_Pperp,R_rms_fm,"
+        csv << "step,t_fm,n_active,E_kin_gev,E_pot_gev,H_tot_gev,rho_contrast,Pz_over_Pperp,R_rms_fm,"
                "n_nuc,n_d,n_dstar,n_a3,n_he4,n_a4star,"
                "el_cum,inel22_cum,form21_cum,decay12_cum,max_P\n";
     }
@@ -508,8 +566,12 @@ int main(int argc, char** argv) {
                             st.formations_2to1, st.decays_1to2);
 
                 if (csv.is_open()) {
+                    mean_field.rebuild_potentials(particles, n_test);
+                    const double epot = mean_field.compute_potential_energy_test_gev(n_test);
+                    const double r_con = mean_field.density_contrast_rms();
                     csv << step << "," << t_now << "," << obs.n_active << ","
-                        << obs.E_tot << "," << obs.pressure_anisotropy() << "," << obs.rms_radius() << ","
+                        << obs.E_tot << "," << epot << "," << (obs.E_tot + epot) << "," << r_con << ","
+                        << obs.pressure_anisotropy() << "," << obs.rms_radius() << ","
                         << n_nuc << "," << n_d << "," << n_dstar << ","
                         << n_a3 << "," << n_he4 << "," << n_a4_exc << ","
                         << st.collisions_elastic << "," << st.collisions_inelastic_2to2 << ","
@@ -525,7 +587,7 @@ int main(int argc, char** argv) {
         }
 
         if (step < n_steps) {
-            stepper.step(particles, grid);
+            stepper.step(particles, grid, &mean_field);
         }
     }
 
@@ -534,17 +596,20 @@ int main(int argc, char** argv) {
     const double elapsed_s =
         std::chrono::duration<double>(t_wall_end - t_wall_start).count();
 
+    mean_field.rebuild_potentials(particles, n_test);
     const GlobalObservables obs_final = obs_calc.compute(particles);
+    const double E_pot_final = mean_field.compute_potential_energy_test_gev(n_test);
+    const double H_tot_final = obs_final.E_tot + E_pot_final;
     const StepStats final_stats = stepper.read_stats();
-    const double rel_dE = std::fabs(obs_final.E_tot - obs0.E_tot) / obs0.E_tot;
+    const double rel_dH = std::fabs(H_tot_final - H_tot0) / std::fabs(H_tot0);
     const double dP_mag = std::sqrt(
         (obs_final.Px_tot - obs0.Px_tot) * (obs_final.Px_tot - obs0.Px_tot) +
         (obs_final.Py_tot - obs0.Py_tot) * (obs_final.Py_tot - obs0.Py_tot) +
         (obs_final.Pz_tot - obs0.Pz_tot) * (obs_final.Pz_tot - obs0.Pz_tot));
 
     std::printf("---------------------------------------------------------------------------------------\n");
-    std::printf(" Conservation   : |dE|/E = %.3e | |dP| = %.3e GeV/c | dB = %lld | dQ = %lld\n",
-                rel_dE, dP_mag,
+    std::printf(" Conservation   : |dH|/H = %.3e | |dP| = %.3e GeV/c | dB = %lld | dQ = %lld\n",
+                rel_dH, dP_mag,
                 obs_final.baryon_tot - obs0.baryon_tot,
                 obs_final.charge_tot - obs0.charge_tot);
     std::printf(" Max Prob Seen  : %.4f (overflows: %llu) | Active Particles: %d -> %d\n",
