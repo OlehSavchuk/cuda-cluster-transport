@@ -1,10 +1,10 @@
 # CUDA Relativistic Nucleon & Light-Cluster Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-11%2F11%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-12%2F12%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A GPU-native relativistic Vlasov–Boltzmann (BUU) transport code written in **CUDA C++17** for **protons, neutrons, and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), off-shell Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay, 46 reversible $2 \leftrightarrow 2$ inelastic nuclear channels with strict detailed balance, and Glauber elastic scattering**.
+A GPU-native relativistic Vlasov–Boltzmann (BUU) transport code written in **CUDA C++17** for **protons, neutrons, and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), heavy-ion collision initialization & FOPI anisotropic flow observables ($v_1, v_2, dN/dy$), binary 3D local energy & baryon density grid output (`CHYD`), off-shell Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay, 46 reversible $2 \leftrightarrow 2$ inelastic nuclear channels, and Glauber elastic scattering**.
 
 When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaussian smearing, dynamic slot compaction, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic reaction/decay kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
 
@@ -12,7 +12,18 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### 1. Spinodal Liquid–Gas Phase Separation & Cluster Droplets (`--eos md-soft` vs `--eos none`)
+### 1. FOPI Heavy-Ion Benchmark: $\text{Au} + \text{Au}$ @ $250\,A\;\text{MeV}$ (`--mode hic`, `--dump-hydro-dir`)
+Semi-central ${}^{197}\text{Au} + {}^{197}\text{Au}$ collision at $E_{\text{lab}} = 250\,A\;\text{MeV}$ ($b = 5.5\;\text{fm}$, equal-velocity CM rapidity $y_{\text{beam}} = \pm 0.3572$, `MD-Soft` Skyrme + Lorentzian momentum-dependent potential). Two Woods–Saxon + local Thomas–Fermi nuclei compress to $\max(n_B / \rho_0) \approx 1.80$ with local excitation energy density $\varepsilon_{\text{LRF}} - m_N n_B \approx 60\;\text{MeV}/\text{fm}^3$, exhibiting in-plane spectator bounce-off ($v_1$), midrapidity out-of-plane squeeze-out ($v_2 < 0$), and abundant light-cluster production ($d, t, {}^3\text{He}, {}^4\text{He}$):
+
+<p align="center">
+  <img src="assets/auau_250amev_collision.gif" alt="FOPI Au + Au at 250 A MeV Collision and Hydro Densities" width="100%">
+</p>
+
+<p align="center">
+  <img src="assets/fopi_auau250_flow.png" alt="FOPI Au + Au 250 A MeV dN/dy, v1, and v2 Flow" width="100%">
+</p>
+
+### 2. Spinodal Liquid–Gas Phase Separation & Cluster Droplets (`--eos md-soft` vs `--eos none`)
 Inside the sub-saturation nuclear spinodal zone ($\rho_B \approx 0.27\,\rho_0$, $T_0 = 6\;\text{MeV}$), a free cascade stays spatially uniform whereas the **Skyrme + Lorentzian Momentum-Dependent mean field** ($K_0 = 215\;\text{MeV}$, $m^*(p_F)/m = 0.69$) spontaneously amplifies Poisson density fluctuations into self-bound liquid nuclear droplets enriched with $d, t, {}^3\text{He}, {}^4\text{He}$, and ${}^4\text{He}^*$:
 
 <p align="center">
@@ -121,21 +132,31 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 │   │   ├── kinematics.cuh          # Cancellation-free Moller flux, CM boosts, 2->2 & 1->2 decays
 │   │   ├── cross_sections.cuh      # ERE+KK+Cugnon NN & Gaussian Glauber cluster cross sections
 │   │   ├── resonances.cuh          # Relativistic Breit-Wigner spectral functions & BW samplers
-│   │   └── inelastic_channels.cuh  # 46 reversible 2<->2 transfer, catalysis & excitation rules
+│   │   ├── inelastic_channels.cuh  # 46 reversible 2<->2 transfer, catalysis & excitation rules
+│   │   └── mean_field.cuh          # Skyrme + Lorentzian MD potential, CIC Vlasov & smoothing
 │   └── sim/
 │       ├── particles.cuh           # Dynamic SoA layout with GPU atomic appends & compaction
 │       ├── grid.cuh                # GPU multi-level prefix sum + counting-sort 3D cell builder
-│       ├── stepper.cuh             # Strang-split drift + decay + DisjointPairs/AllPairs kernels
-│       ├── init_conditions.cuh     # Off-shell grand-canonical sampler, nucleosynthesis & fireball
+│       ├── stepper.cuh             # Symplectic Strang-split Vlasov + decay + stochastic collisions
+│       ├── init_conditions.cuh     # Woods-Saxon + Thomas-Fermi HIC, grand-canonical & fireball
+│       ├── hydro_io.cuh            # Binary 3D local energy & baryon density grid writer ("CHYD")
+│       ├── flow_observables.cuh    # Freeze-out resonance decay & FOPI dN/dy, v1, v2 calculator
 │       └── observables.cuh         # Parallel GPU reductions for P^mu, B, Q, T^ij & mass moments
 ├── src/
-│   ├── main.cu                     # CLI simulation driver, CSV logger & binary/BW exporters
-│   └── tests.cu                    # Automated physics, detailed-balance & nucleosynthesis suite
+│   ├── main.cu                     # CLI simulation driver, CSV logger & binary CHYD/CTR2 exporters
+│   └── tests.cu                    # Automated physics, Vlasov, HIC & detailed-balance suite
 ├── scripts/
+│   ├── generate_auau_fopi_plots.py # FOPI Au+Au 250 AMeV 3D+hydro animation & v1/v2/dNdy plots
+│   ├── generate_meanfield_animations.py
 │   ├── generate_inelastic_animations.py
 │   └── generate_animations.py      # Reproduces all GIF/MP4 animations and physics figures
 └── assets/                         # Rendered animations and spectral/cross-section plots
 ```
+
+### Binary 3D Local Energy & Baryon Density Format (`CHYD`)
+Passing `--dump-hydro-dir <dir> --dump-hydro-every <N>` writes self-describing binary 3D grid files `hydro_grid_XXXX.bin` (`include/sim/hydro_io.cuh`):
+- **88-byte header (`HydroGridHeader`)**: `uint32 magic = 0x44594843 ("CHYD")`, `int32 version, step, nx, ny, nz, n_fields=8, reserved`, `float64 t_fm, xmin, xmax, ymin, ymax, zmin, zmax`.
+- **8 contiguous `float32` 3D arrays** of shape `(nz, ny, nx)`: `[0] rho_B_lab` ($\text{fm}^{-3}$), `[1] rho_B_lrf` (comoving proper $n_B = \sqrt{(J^0)^2 - |\vec{J}|^2}$), `[2] rho_Q_lab`, `[3] e_tot_lab` ($T^{00}_{\text{kin}} + \mathcal{V}_{\text{Skyrme+MD}}$ in $\text{GeV}/\text{fm}^3$), `[4] eps_lrf` (local rest-frame energy density $\varepsilon_{\text{LRF}}$ in $\text{GeV}/\text{fm}^3$), `[5..7] vx, vy, vz` ($c$).
 
 ### Stochastic Collision Kernel (`DisjointPairs` vs `AllPairs`)
 Inside each spatial cell of volume $\Delta V$ containing $N_c$ test particles (oversampling factor $N_{\text{test}}$):
@@ -167,6 +188,11 @@ ctest --test-dir build --output-on-failure -V
 # Dynamic nucleosynthesis of d, d*, t, 3He, 4He, and 4He* from pure p + n
 ./build/cluster_transport --mode nucleosynthesis --npart 30000 --ntest 15 --steps 80 --dt 0.15
 
+# FOPI Au + Au @ 250 A MeV (b = 5.5 fm) with binary 3D hydro dumps every 1.5 fm/c & flow CSV
+./build/cluster_transport --mode hic --A-nuc 197 --Z-nuc 79 --elab-amev 250.0 --impact-b 5.5 \
+  --eos md-soft --ntest 120 --box 48.0 --grid 24 --steps 240 --dt 0.30 \
+  --dump-hydro-dir output/auau250_hydro --dump-hydro-every 5 --flow-csv output/fopi_auau250_flow.csv
+
 # Spinodal clumping + cluster nucleation with MD-Soft Skyrme + Momentum-Dependent potential
 ./build/cluster_transport --mode nucleosynthesis --eos md-soft --npart 30000 --ntest 30 --temp 8.0 --steps 250 --dt 0.40
 
@@ -177,6 +203,7 @@ ctest --test-dir build --output-on-failure -V
 ### 4. Regenerate Animations & Figures
 Requires `python3` (`numpy`, `matplotlib`) and `ffmpeg`:
 ```bash
+python3 scripts/generate_auau_fopi_plots.py
 python3 scripts/generate_meanfield_animations.py
 python3 scripts/generate_n0_over_8_nucleation.py
 python3 scripts/generate_inelastic_animations.py
@@ -199,10 +226,12 @@ python3 scripts/generate_animations.py
 9. **`test_reactive_expanding_fireball`**: Radial Hubble expansion with coupled elastic, inelastic, and resonance decay dynamics.
 10. **`test_eos_saturation_and_md`**: Verifies exact cold-matter saturation ($E/A(\rho_0) = -16.00\;\text{MeV}$, $P(\rho_0)=0$, $K_0 = 200/215/380\;\text{MeV}$), optical-potential zero crossing ($U(0)=-72.2\;\text{MeV} \to U(1\;\text{GeV}/c)=+10.7\;\text{MeV}$), and Landau effective mass $m^*(p_F)/m = 0.692$.
 11. **`test_vlasov_and_spinodal`**: Verifies symplectic Velocity-Verlet Hamiltonian conservation ($|\Delta H|/H < 10^{-3}$), exact CIC lattice momentum conservation ($|\Delta\vec{P}| \sim 10^{-13}\;\text{GeV}/c$), and spinodal density-contrast amplification.
+12. **`test_hic_and_hydro_binary_output`**: Verifies Woods–Saxon + Thomas–Fermi $\text{Au}+\text{Au}$ CM initialization ($|\vec{P}_{\text{tot}}| < 10^{-11}\;\text{GeV}/c$) and binary `CHYD` 3D density grid conservation ($\int \rho_{B,\text{lab}}\,dV = 2 A_{\text{nuc}}$).
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA
 - [x] Relativistic Breit–Wigner spectral functions and $2 \leftrightarrow 1$ resonance formation/decay ($d^* \leftrightarrow N+N$, ${}^4\text{He}^* \leftrightarrow p+t / n+{}^3\text{He} / d+d$, ${}^4\text{H}^* \leftrightarrow n+t$, ${}^4\text{Li}^* \leftrightarrow p+{}^3\text{He}$)
 - [x] Reversible $2 \leftrightarrow 2$ nuclear transfer ($dd \leftrightarrow pt/n\,{}^3\text{He}$, $dt \leftrightarrow n\alpha$, $d\,{}^3\text{He} \leftrightarrow p\alpha$), deuteron catalysis ($N+d \leftrightarrow N+d^*$), and ${}^4\text{He} \leftrightarrow {}^4\text{He}^*$ excitation with off-shell detailed balance
 - [x] Skyrme + Lorentzian momentum-dependent mean-field potential (`SkyrmeSoft`, `MDSoft`, `MDStiff`) with baryon/isospin-additive cluster folding and symplectic CIC Vlasov kernels
+- [x] Heavy-ion collision initialization (`--mode hic`), FOPI flow observables ($v_1, v_2, dN/dy$), and binary 3D local energy & baryon density grid output (`CHYD`)
 - [ ] GPU 6D phase-space Pauli blocking $(1 - f_3)(1 - f_4)$ & Bose enhancement + direct $2 \leftrightarrow 3$ channels

@@ -16,7 +16,9 @@
 #include "physics/mean_field.cuh"
 #include "physics/resonances.cuh"
 #include "physics/species.cuh"
+#include "sim/flow_observables.cuh"
 #include "sim/grid.cuh"
+#include "sim/hydro_io.cuh"
 #include "sim/init_conditions.cuh"
 #include "sim/observables.cuh"
 #include "sim/particles.cuh"
@@ -263,8 +265,15 @@ void print_species_catalog(const CrossSectionConfig& xs_cfg) {
 void print_usage(const char* prog) {
     std::printf(
         "Usage: %s [options]\n"
-        "  --mode <aniso|box|fireball|slabs|nucleosynthesis>\n"
+        "  --mode <aniso|box|fireball|slabs|nucleosynthesis|hic>\n"
         "                                     Simulation scenario (default: nucleosynthesis)\n"
+        "  --A-nuc <int>                      HIC nucleus mass number A (default: 197 for Au)\n"
+        "  --Z-nuc <int>                      HIC nucleus proton number Z (default: 79 for Au)\n"
+        "  --elab-amev <float>                HIC lab kinetic energy [A MeV] (default: 250.0)\n"
+        "  --impact-b <float>                 HIC impact parameter b [fm] (default: 5.5)\n"
+        "  --flow-csv <path>                  Write FOPI rapidity dN/dy, v1, v2 table to CSV\n"
+        "  --dump-hydro-dir <dir>             Write binary 3D energy & baryon density grids\n"
+        "  --dump-hydro-every <int>           Steps between binary hydro grid dumps (default: 5)\n"
         "  --reactions <all|elastic>          Enable full inelastic+BW network or elastic only\n"
         "  --eos <none|skyrme-soft|md-soft|md-stiff>\n"
         "                                     Mean-field EOS + MD potential (default: none)\n"
@@ -314,6 +323,13 @@ int main(int argc, char** argv) {
     double temp_mev = 55.0;
     double cluster_boost = 1.0;
     double excited_boost = 1.0;
+    int A_nuc = 197;
+    int Z_nuc = 79;
+    double elab_amev = 250.0;
+    double impact_b = 5.5;
+    std::string flow_csv_path;
+    std::string dump_hydro_dir;
+    int dump_hydro_every = 5;
     std::string csv_path;
     std::string dump_dir;
     int dump_every = 1;
@@ -337,6 +353,20 @@ int main(int argc, char** argv) {
         };
         if (arg == "--mode") {
             mode = next_str();
+        } else if (arg == "--A-nuc") {
+            A_nuc = std::stoi(next_str());
+        } else if (arg == "--Z-nuc") {
+            Z_nuc = std::stoi(next_str());
+        } else if (arg == "--elab-amev") {
+            elab_amev = std::stod(next_str());
+        } else if (arg == "--impact-b") {
+            impact_b = std::stod(next_str());
+        } else if (arg == "--flow-csv") {
+            flow_csv_path = next_str();
+        } else if (arg == "--dump-hydro-dir") {
+            dump_hydro_dir = next_str();
+        } else if (arg == "--dump-hydro-every") {
+            dump_hydro_every = std::stoi(next_str());
         } else if (arg == "--reactions") {
             rxn_mode = next_str();
         } else if (arg == "--eos") {
@@ -450,8 +480,18 @@ int main(int argc, char** argv) {
     const double mu_B_gev = 0.780;
     const double mu_Q_gev = -0.006;
 
+    double y_cm_beam = 0.3464;
     std::vector<HostParticle> host_init;
-    if (mode == "nucleosynthesis") {
+    if (mode == "hic") {
+        gcfg.boundary = BoundaryMode::OpenExpanding;
+        const double half_L = 0.5 * box_L;
+        gcfg.xmin = -half_L; gcfg.xmax = half_L;
+        gcfg.ymin = -half_L; gcfg.ymax = half_L;
+        gcfg.zmin = -half_L; gcfg.zmax = half_L;
+        host_init = init_heavy_ion_collision(
+            A_nuc, Z_nuc, n_test, elab_amev, impact_b, step_cfg.seed, y_cm_beam);
+        n_particles = static_cast<int>(host_init.size());
+    } else if (mode == "nucleosynthesis") {
         // Start from 100% pure protons & neutrons and nucleate d, d*, t, 3He, 4He, 4He* dynamically!
         gcfg.boundary = BoundaryMode::PeriodicBox;
         gcfg.xmin = 0.0; gcfg.xmax = box_L;
@@ -540,11 +580,13 @@ int main(int argc, char** argv) {
 
     const int report_every = (n_steps >= 10) ? (n_steps / 10) : 1;
     int frame_idx = 0;
+    int hydro_idx = 0;
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
 
     for (int step = 0; step <= n_steps; ++step) {
-        const bool need_obs = (step % report_every == 0) || (step == n_steps) ||
-                              (!dump_dir.empty() && (step % dump_every == 0));
+        const bool do_frame = (!dump_dir.empty() && (step % dump_every == 0));
+        const bool do_hydro = (!dump_hydro_dir.empty() && (step % dump_hydro_every == 0));
+        const bool need_obs = (step % report_every == 0) || (step == n_steps) || do_frame || do_hydro;
 
         if (need_obs) {
             const GlobalObservables obs = obs_calc.compute(particles);
@@ -579,10 +621,16 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (!dump_dir.empty() && (step % dump_every == 0)) {
+            if (do_frame || do_hydro) {
                 const auto host_snap = particles.download();
-                write_binary_frame(dump_dir, frame_idx++, step, t_now, gcfg,
-                                   obs, st, host_snap, dump_limit);
+                if (do_frame) {
+                    write_binary_frame(dump_dir, frame_idx++, step, t_now, gcfg,
+                                       obs, st, host_snap, dump_limit);
+                }
+                if (do_hydro) {
+                    write_hydro_grid_binary(dump_hydro_dir, hydro_idx++, step, t_now, n_test,
+                                            gcfg, mf_cfg, host_snap);
+                }
             }
         }
 
@@ -618,6 +666,11 @@ int main(int argc, char** argv) {
     std::printf(" Wall Time      : %.3f s (%.2f ms/step)\n",
                 elapsed_s, 1000.0 * elapsed_s / (n_steps > 0 ? n_steps : 1));
     std::printf("=======================================================================================\n");
+
+    if (mode == "hic" || !flow_csv_path.empty()) {
+        const auto final_snap = particles.download();
+        compute_and_write_fopi_flow(final_snap, n_test, y_cm_beam, flow_csv_path, step_cfg.seed);
+    }
 
     return 0;
 }

@@ -1,6 +1,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 #include "backend/cuda_compat.cuh"
@@ -12,7 +14,9 @@
 #include "physics/mean_field.cuh"
 #include "physics/resonances.cuh"
 #include "physics/species.cuh"
+#include "sim/flow_observables.cuh"
 #include "sim/grid.cuh"
+#include "sim/hydro_io.cuh"
 #include "sim/init_conditions.cuh"
 #include "sim/observables.cuh"
 #include "sim/particles.cuh"
@@ -654,6 +658,59 @@ void test_vlasov_meanfield_conservation_and_spinodal() {
                 dP, rel_dH, c_free, c_md);
 }
 
+void test_hic_and_hydro_binary_output() {
+    double y_cm = 0.0;
+    const int A_nuc = 197, Z_nuc = 79, n_test = 15;
+    auto hic_p = init_heavy_ion_collision(A_nuc, Z_nuc, n_test, 250.0, 5.5, 4242ULL, y_cm);
+    TEST_ASSERT(static_cast<int>(hic_p.size()) == 2 * A_nuc * n_test, "HIC nucleon count mismatch");
+    TEST_ASSERT(std::fabs(y_cm - 0.35723) < 1.0e-3, "Au+Au 250 AMeV y_cm_beam mismatch");
+
+    ParticleSystem ps;
+    ps.upload(hic_p);
+    ObservableCalculator obs_calc;
+    const GlobalObservables obs = obs_calc.compute(ps);
+    TEST_ASSERT(obs.baryon_tot == 2LL * A_nuc * n_test && obs.charge_tot == 2LL * Z_nuc * n_test,
+                "HIC baryon or charge number mismatch");
+    const double p_cm_err = std::sqrt(obs.Px_tot * obs.Px_tot + obs.Py_tot * obs.Py_tot + obs.Pz_tot * obs.Pz_tot);
+    TEST_ASSERT(p_cm_err < 1.0e-11, "HIC equal-velocity CM frame total 3-momentum non-zero");
+
+    GridConfig gcfg{};
+    gcfg.boundary = BoundaryMode::OpenExpanding;
+    gcfg.nx = 16; gcfg.ny = 16; gcfg.nz = 16;
+    gcfg.xmin = -24.0; gcfg.xmax = 24.0;
+    gcfg.ymin = -24.0; gcfg.ymax = 24.0;
+    gcfg.zmin = -24.0; gcfg.zmax = 24.0;
+
+    const std::string tmp_dir = "/tmp/test_chyd_dump";
+    const MeanFieldConfig mf_cfg = make_mean_field_config(EOSPreset::MDSoft);
+    write_hydro_grid_binary(tmp_dir, 0, 0, 0.0, n_test, gcfg, mf_cfg, hic_p);
+
+    std::ifstream in(tmp_dir + "/hydro_grid_0000.bin", std::ios::binary);
+    TEST_ASSERT(in.good(), "Failed to open binary CHYD hydro grid file");
+    HydroGridHeader hdr{};
+    in.read(reinterpret_cast<char*>(&hdr), sizeof(HydroGridHeader));
+    TEST_ASSERT(hdr.magic == 0x44594843U && hdr.n_fields == 8 && hdr.nx == 16, "CHYD header invalid");
+
+    const int nc = gcfg.num_cells();
+    std::vector<float> fields(static_cast<std::size_t>(8 * nc));
+    in.read(reinterpret_cast<char*>(fields.data()), static_cast<std::streamsize>(fields.size() * sizeof(float)));
+    in.close();
+    std::filesystem::remove_all(tmp_dir);
+
+    double b_int = 0.0, max_nb_lrf = 0.0, max_eps_lrf = 0.0;
+    const double dV = gcfg.cell_volume_fm3();
+    for (int c = 0; c < nc; ++c) {
+        b_int += static_cast<double>(fields[c]) * dV;
+        if (fields[nc + c] > max_nb_lrf) max_nb_lrf = fields[nc + c];
+        if (fields[4 * nc + c] > max_eps_lrf) max_eps_lrf = fields[4 * nc + c];
+    }
+    TEST_ASSERT(std::fabs(b_int - 2.0 * A_nuc) / (2.0 * A_nuc) < 2.0e-3,
+                "Integrated binary rho_B_lab * dV != 2 * A_nuc");
+    TEST_ASSERT(max_nb_lrf > 0.10 && max_eps_lrf > 0.09, "Expected nuclear-density core in CHYD fields");
+    std::printf("[PASS] test_hic_and_hydro_binary_output (int rho_B dV = %.2f / %d, max n_B = %.3f fm^-3, max eps = %.3f GeV/fm^3)\n",
+                b_int, 2 * A_nuc, max_nb_lrf, max_eps_lrf);
+}
+
 }  // namespace
 
 int main() {
@@ -671,6 +728,7 @@ int main() {
     test_reactive_expanding_fireball();
     test_eos_saturation_and_momentum_dependence();
     test_vlasov_meanfield_conservation_and_spinodal();
+    test_hic_and_hydro_binary_output();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

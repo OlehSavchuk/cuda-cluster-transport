@@ -445,4 +445,115 @@ inline std::vector<HostParticle> init_colliding_slabs(int n_particles,
     return out;
 }
 
+// 4. Symmetric Heavy-Ion Collision (e.g. FOPI Au+Au @ 250 AMeV) in equal-velocity NN CM frame
+// Initializes two Woods-Saxon + local Thomas-Fermi nuclei (A_nuc, Z_nuc) boosted by +-beta_cm along z
+// at impact parameter x = +-b/2 (reaction plane = x-z plane).
+inline std::vector<HostParticle> init_heavy_ion_collision(int A_nuc,
+                                                          int Z_nuc,
+                                                          int n_test,
+                                                          double elab_kin_amev,
+                                                          double impact_b_fm,
+                                                          std::uint64_t seed,
+                                                          double& out_y_cm_beam) {
+    using namespace phys;
+    const double T_lab_gev = elab_kin_amev * MEV_TO_GEV;
+    const double E_lab = MASS_NUCLEON_AVG + T_lab_gev;
+    const double p_lab = std::sqrt(E_lab * E_lab - MASS_NUCLEON_AVG * MASS_NUCLEON_AVG);
+    const double y_lab = 0.5 * std::log((E_lab + p_lab) / (E_lab - p_lab));
+    out_y_cm_beam = 0.5 * y_lab;
+
+    const double beta_cm = std::tanh(out_y_cm_beam);
+    const double gamma_cm = std::cosh(out_y_cm_beam);
+
+    const double R_ws = 1.12 * std::cbrt(static_cast<double>(A_nuc));
+    const double a_ws = 0.54;
+    const double r_max = R_ws + 8.0 * a_ws;
+    const double z0 = R_ws + 2.5;  // Touching distance + 2.5 fm nuclear skin clearance
+
+    const int n_per_nucleus = A_nuc * n_test;
+    const int z_per_nucleus = Z_nuc * n_test;
+    std::vector<HostParticle> out;
+    out.reserve(2 * n_per_nucleus);
+
+    for (int side = 0; side < 2; ++side) {
+        std::vector<HostParticle> nuc(n_per_nucleus);
+        double sx = 0.0, sy = 0.0, sz = 0.0;
+        double spx = 0.0, spy = 0.0, spz = 0.0;
+
+        for (int i = 0; i < n_per_nucleus; ++i) {
+            PhiloxRng rng(seed, 400ULL + side, static_cast<std::uint64_t>(i));
+            const bool is_p = (i < z_per_nucleus);
+            const int sp_id = is_p ? PROTON : NEUTRON;
+            const double m = get_species_info(sp_id).pole_mass_gev;
+
+            // Sample Woods-Saxon radius r^2 / (1 + exp((r - R)/a))
+            double r = 0.0, ws_f = 0.0;
+            while (true) {
+                r = r_max * rng.uniform();
+                ws_f = 1.0 / (1.0 + std::exp((r - R_ws) / a_ws));
+                if (rng.uniform() < (r * r / (r_max * r_max)) * ws_f * 2.4) break;
+            }
+            const double cth = 1.0 - 2.0 * rng.uniform();
+            const double sth = std::sqrt((1.0 - cth * cth > 0.0) ? (1.0 - cth * cth) : 0.0);
+            const double phi = TWO_PI * rng.uniform();
+            const double rx = r * sth * std::cos(phi);
+            const double ry = r * sth * std::sin(phi);
+            const double rz = r * cth;
+
+            // Local Thomas-Fermi momentum sphere p_F,tau(r) = hbarc * (3 pi^2 rho_tau(r))^(1/3)
+            const double frac_iso = is_p ? (static_cast<double>(Z_nuc) / A_nuc)
+                                         : (static_cast<double>(A_nuc - Z_nuc) / A_nuc);
+            const double rho_tau = 0.168 * frac_iso * ws_f;
+            const double pF = HBARC * std::cbrt(3.0 * PI * PI * rho_tau);
+            const double pmag = pF * std::cbrt(rng.uniform());
+            const double pcth = 1.0 - 2.0 * rng.uniform();
+            const double psth = std::sqrt((1.0 - pcth * pcth > 0.0) ? (1.0 - pcth * pcth) : 0.0);
+            const double pphi = TWO_PI * rng.uniform();
+
+            nuc[i].x = rx; nuc[i].y = ry; nuc[i].z = rz;
+            nuc[i].px = pmag * psth * std::cos(pphi);
+            nuc[i].py = pmag * psth * std::sin(pphi);
+            nuc[i].pz = pmag * pcth;
+            nuc[i].mass = m;
+            nuc[i].species = sp_id;
+            sx += rx; sy += ry; sz += rz;
+            spx += nuc[i].px; spy += nuc[i].py; spz += nuc[i].pz;
+        }
+
+        const double inv_n = 1.0 / static_cast<double>(n_per_nucleus);
+        const double x_shift = (side == 0) ? (+0.5 * impact_b_fm) : (-0.5 * impact_b_fm);
+        const double z_shift = (side == 0) ? (-z0) : (+z0);
+        const double bz = (side == 0) ? (+beta_cm) : (-beta_cm);
+
+        for (int i = 0; i < n_per_nucleus; ++i) {
+            HostParticle& hp = nuc[i];
+            hp.x = (hp.x - sx * inv_n) + x_shift;
+            hp.y = (hp.y - sy * inv_n);
+            // Lorentz-contracted longitudinal profile in CM frame!
+            hp.z = (hp.z - sz * inv_n) / gamma_cm + z_shift;
+
+            const double px0 = hp.px - spx * inv_n;
+            const double py0 = hp.py - spy * inv_n;
+            const double pz0 = hp.pz - spz * inv_n;
+            const double E0 = std::sqrt(hp.mass * hp.mass + px0 * px0 + py0 * py0 + pz0 * pz0);
+            const FourVector plab = lorentz_boost_from_cm(hp.mass, E0, px0, py0, pz0, 0.0, 0.0, bz, gamma_cm);
+            hp.t = 0.0;
+            hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
+            out.push_back(hp);
+        }
+    }
+
+    // Remove tiny O(1/sqrt(N)) Fermi-energy boost asymmetry so total 3-momentum P_cm == 0 to machine precision
+    double tot_px = 0.0, tot_py = 0.0, tot_pz = 0.0;
+    for (const auto& hp : out) { tot_px += hp.px; tot_py += hp.py; tot_pz += hp.pz; }
+    const double inv_tot = 1.0 / static_cast<double>(out.size());
+    for (auto& hp : out) {
+        hp.px -= tot_px * inv_tot;
+        hp.py -= tot_py * inv_tot;
+        hp.pz -= tot_pz * inv_tot;
+        hp.E = std::sqrt(hp.mass * hp.mass + hp.px * hp.px + hp.py * hp.py + hp.pz * hp.pz);
+    }
+    return out;
+}
+
 }  // namespace transport
