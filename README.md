@@ -19,6 +19,12 @@ Semi-central ${}^{197}\text{Au} + {}^{197}\text{Au}$ collision at $E_{\text{lab}
   <img src="assets/auau_250amev_collision.gif" alt="FOPI Au + Au at 250 A MeV Collision and Hydro Densities" width="100%">
 </p>
 
+Direct benchmark against published **FOPI Collaboration experimental data** (W. Reisdorf *et al.*, *Nucl. Phys. A* **848** (2010) 366 & *Nucl. Phys. A* **876** (2012) 1) comparing `MD-Soft` ($K_0 = 215\;\text{MeV}$) vs. `MD-Stiff` ($K_0 = 380\;\text{MeV}$) under identical FOPI centrality ($0.25 < b_0 < 0.45$ and $b_0 < 0.15$) and scaled transverse 4-velocity ($u_{t0} > 0.8$) cuts:
+
+<p align="center">
+  <img src="assets/fopi_auau250_comparison.png" alt="CUDA Cluster Transport vs FOPI Collaboration Data Au+Au 250 A MeV" width="100%">
+</p>
+
 <p align="center">
   <img src="assets/fopi_auau250_flow.png" alt="FOPI Au + Au 250 A MeV dN/dy, v1, and v2 Flow" width="100%">
 </p>
