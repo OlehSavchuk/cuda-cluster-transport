@@ -39,7 +39,7 @@ COL_DSTAR = "#e879f9"     # d*, nn*, pp* (neon magenta)
 COL_HE4STAR = "#fb7185"   # 4He* (17 levels) + 4H*, 4Li* (coral crimson)
 COL_SPARK = "#ffffff"     # Active collision vertex flash
 
-HEADER_FMT = "<Iiii dddd Q dddddd"
+HEADER_FMT = "<Iiii dddd QQQQ iiiiii dddddd"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 PARTICLE_DTYPE = np.dtype([
     ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
@@ -82,10 +82,10 @@ def load_frames(dump_dir: Path):
                 "E_tot": vals[5],
                 "aniso": vals[6],
                 "rms_r": vals[7],
-                "collisions": vals[8],
-                "xmin": vals[9], "xmax": vals[10],
-                "ymin": vals[11], "ymax": vals[12],
-                "zmin": vals[13], "zmax": vals[14],
+                "collisions": vals[8] + vals[9] + vals[10],
+                "xmin": vals[18], "xmax": vals[19],
+                "ymin": vals[20], "ymax": vals[21],
+                "zmin": vals[22], "zmax": vals[23],
             }
             pdata = np.frombuffer(f.read(), dtype=PARTICLE_DTYPE)
             frames.append((hdr, pdata))

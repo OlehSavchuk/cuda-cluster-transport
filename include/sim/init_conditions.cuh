@@ -8,6 +8,7 @@
 #include "backend/philox_rng.cuh"
 #include "physics/constants.cuh"
 #include "physics/kinematics.cuh"
+#include "physics/resonances.cuh"
 #include "physics/species.cuh"
 #include "sim/grid.cuh"
 #include "sim/particles.cuh"
@@ -72,23 +73,14 @@ HD_INLINE FourVector sample_maxwell_juttner(double mass, double T_gev, PhiloxRng
     };
 }
 
-// Compute grand-canonical Maxwell-Juttner equilibrium density n_i [fm^-3]
-// via 32-point Gauss-Laguerre-like quadrature on u = K / T in [0, inf).
-inline double equilibrium_density_fm3(int species_id,
-                                      double T_gev,
-                                      double mu_B_gev,
-                                      double mu_Q_gev) {
+// Fixed-mass Maxwell-Juttner density n(m; g, T, mu) [fm^-3]
+inline double fixed_mass_mj_density_fm3(double m, int degeneracy, double T_gev, double mu_gev) {
     using namespace phys;
-    const SpeciesInfo sp = get_species_info(species_id);
-    const double m = sp.pole_mass_gev;
-    const double mu = sp.baryon_num * mu_B_gev + sp.charge * mu_Q_gev;
-    const double fugacity_arg = (mu - m) / T_gev;
+    const double fugacity_arg = (mu_gev - m) / T_gev;
     if (fugacity_arg < -500.0) return 0.0;
 
-    // Integrate int_0^inf p * E * exp(-K/T) dK = T^2 int_0^inf sqrt(T u (T u + 2m)) (m + T u) e^{-u} du
-    // Substitute u = s^2 (du = 2 s ds) on s in [0, 8] with midpoint rule (128 points -> <1e-9 accuracy)
-    constexpr int N_PTS = 128;
-    constexpr double S_MAX = 8.0;
+    constexpr int N_PTS = 96;
+    constexpr double S_MAX = 7.5;
     const double ds = S_MAX / static_cast<double>(N_PTS);
     double integral = 0.0;
     for (int j = 0; j < N_PTS; ++j) {
@@ -101,8 +93,98 @@ inline double equilibrium_density_fm3(int species_id,
     }
 
     const double prefactor =
-        static_cast<double>(sp.degeneracy) / (2.0 * PI * PI * HBARC * HBARC * HBARC);
+        static_cast<double>(degeneracy) / (2.0 * PI * PI * HBARC * HBARC * HBARC);
     return prefactor * T_gev * integral * std::exp(fugacity_arg);
+}
+
+// Grand-canonical equilibrium density n_i [fm^-3]:
+// When use_breit_wigner == true, integrates A_R(m) * n_MJ(m, T, mu) over [m_min, m_max]
+// so off-shell detailed balance holds strictly in grand-canonical box tests!
+inline double equilibrium_density_fm3(int species_id,
+                                      double T_gev,
+                                      double mu_B_gev,
+                                      double mu_Q_gev,
+                                      bool use_breit_wigner = true,
+                                      const SpectralNormTable* norms_ptr = nullptr) {
+    const SpeciesInfo sp = get_species_info(species_id);
+    const double mu = sp.baryon_num * mu_B_gev + sp.charge * mu_Q_gev;
+    if (!sp.is_excited || !use_breit_wigner) {
+        return fixed_mass_mj_density_fm3(sp.pole_mass_gev, sp.degeneracy, T_gev, mu);
+    }
+
+    const SpectralNormTable local_norms =
+        (norms_ptr != nullptr) ? (*norms_ptr) : compute_spectral_norm_table();
+
+    const double m_min = resonance_min_mass(species_id);
+    const double m_max = resonance_max_mass(species_id);
+    const double m0 = sp.pole_mass_gev;
+    const double split = (m0 > m_min && m0 < m_max) ? m0 : 0.5 * (m_min + m_max);
+    const double segs[3] = {m_min, split, m_max};
+
+    constexpr double gx[4] = {
+        0.183434642495649805, 0.525532409916328986,
+        0.796666477413626740, 0.960289856497536232
+    };
+    constexpr double gw[4] = {
+        0.362683783378361983, 0.313706645877887287,
+        0.222381034453374471, 0.101228536290376259
+    };
+
+    double sum = 0.0;
+    for (int s = 0; s < 2; ++s) {
+        constexpr int N_SUB = 32;
+        const double h = (segs[s + 1] - segs[s]) / static_cast<double>(N_SUB);
+        for (int k = 0; k < N_SUB; ++k) {
+            const double mid = segs[s] + (k + 0.5) * h;
+            const double half = 0.5 * h;
+            for (int q = 0; q < 4; ++q) {
+                const double m1 = mid - half * gx[q];
+                const double m2 = mid + half * gx[q];
+                sum += half * gw[q] * (
+                    spectral_function(species_id, m1, local_norms) *
+                        fixed_mass_mj_density_fm3(m1, sp.degeneracy, T_gev, mu) +
+                    spectral_function(species_id, m2, local_norms) *
+                        fixed_mass_mj_density_fm3(m2, sp.degeneracy, T_gev, mu));
+            }
+        }
+    }
+    return sum;
+}
+
+// Sample initial thermal mass m_R of an excited resonance from A_R(m) * n_MJ(m, T)
+inline double sample_thermal_breit_wigner_mass(int res_id, double T_gev, PhiloxRng& rng) {
+    const SpeciesInfo sp = get_species_info(res_id);
+    if (!sp.is_excited) return sp.pole_mass_gev;
+
+    const double m_min = resonance_min_mass(res_id);
+    const double m_max = resonance_max_mass(res_id);
+    const double m0 = sp.pole_mass_gev;
+    const double w0 = m0 * sp.width_gev;
+    const double th_min = std::atan((m_min * m_min - m0 * m0) / w0);
+    const double th_max = std::atan((m_max * m_max - m0 * m0) / w0);
+
+    const double n_ref = fixed_mass_mj_density_fm3(m_min, 1, T_gev, 0.0);
+    constexpr double RATIO_BOUND = 3.5;
+
+    for (int iter = 0; iter < 128; ++iter) {
+        const double th = th_min + (th_max - th_min) * rng.uniform();
+        const double m2 = m0 * m0 + w0 * std::tan(th);
+        if (m2 <= m_min * m_min || m2 >= m_max * m_max) continue;
+        const double m = std::sqrt(m2);
+        const double g_tot = total_width_gev(res_id, m);
+        if (g_tot <= 0.0) continue;
+
+        const double dm2 = m2 - m0 * m0;
+        const double mg = m * g_tot;
+        const double bw_ratio = (mg / w0) * ((dm2 * dm2 + w0 * w0) / (dm2 * dm2 + mg * mg));
+        const double mj_ratio = (n_ref > 0.0)
+                                    ? (fixed_mass_mj_density_fm3(m, 1, T_gev, 0.0) / n_ref)
+                                    : std::exp(-(m - m_min) / T_gev);
+        if (rng.uniform() < (bw_ratio * mj_ratio) / RATIO_BOUND) {
+            return m;
+        }
+    }
+    return m0;
 }
 
 struct MixtureConfig {
@@ -110,8 +192,7 @@ struct MixtureConfig {
     bool include_ground_clusters = true;
     bool include_excited_dstar = true;
     bool include_excited_he4 = true;
-    // Optional statistical enhancement of clusters/excited states for finite-statistics tests
-    // (Set both to 1.0 for pure grand-canonical SHM abundances)
+    bool use_breit_wigner = true;
     double cluster_yield_boost = 1.0;
     double excited_yield_boost = 1.0;
 };
@@ -120,6 +201,7 @@ inline std::vector<double> build_species_probabilities(double T_gev,
                                                        double mu_B_gev,
                                                        double mu_Q_gev,
                                                        const MixtureConfig& mix) {
+    const SpectralNormTable norms = compute_spectral_norm_table();
     std::vector<double> weights(NUM_SPECIES, 0.0);
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
@@ -128,7 +210,8 @@ inline std::vector<double> build_species_probabilities(double T_gev,
         if (sp.baryon_num == 2 && sp.is_excited && !mix.include_excited_dstar) continue;
         if (sp.baryon_num == 4 && sp.is_excited && !mix.include_excited_he4) continue;
 
-        double w = equilibrium_density_fm3(id, T_gev, mu_B_gev, mu_Q_gev);
+        double w = equilibrium_density_fm3(
+            id, T_gev, mu_B_gev, mu_Q_gev, mix.use_breit_wigner, &norms);
         if (sp.baryon_num >= 2) w *= mix.cluster_yield_boost;
         if (sp.is_excited) w *= mix.excited_yield_boost;
         weights[id] = w;
@@ -142,6 +225,33 @@ inline std::vector<double> build_species_probabilities(double T_gev,
     }
     for (double& w : weights) w /= sum;
     return weights;
+}
+
+// Compute exact grand-canonical total test-particle count N_test * V * sum_i n_i^eq(T, mu_B, mu_Q)
+// Required whenever testing 2 <-> 1 chemical equilibrium so physical density matches mu_B!
+inline int grand_canonical_test_particles(const GridConfig& grid,
+                                          int n_test,
+                                          double T_gev,
+                                          double mu_B_gev,
+                                          double mu_Q_gev,
+                                          const MixtureConfig& mix) {
+    const SpectralNormTable norms = compute_spectral_norm_table();
+    double n_tot_fm3 = 0.0;
+    for (int id = 0; id < NUM_SPECIES; ++id) {
+        const SpeciesInfo sp = get_species_info(id);
+        if (sp.baryon_num == 1 && !mix.include_nucleons) continue;
+        if (sp.baryon_num >= 2 && !sp.is_excited && !mix.include_ground_clusters) continue;
+        if (sp.baryon_num == 2 && sp.is_excited && !mix.include_excited_dstar) continue;
+        if (sp.baryon_num == 4 && sp.is_excited && !mix.include_excited_he4) continue;
+
+        double w = equilibrium_density_fm3(
+            id, T_gev, mu_B_gev, mu_Q_gev, mix.use_breit_wigner, &norms);
+        if (sp.baryon_num >= 2) w *= mix.cluster_yield_boost;
+        if (sp.is_excited) w *= mix.excited_yield_boost;
+        n_tot_fm3 += w;
+    }
+    const double vol = grid.lx() * grid.ly() * grid.lz();
+    return static_cast<int>(std::llround(static_cast<double>(n_test) * vol * n_tot_fm3));
 }
 
 inline int sample_species_from_cdf(const std::vector<double>& cdf, PhiloxRng& rng) {
@@ -161,8 +271,8 @@ inline std::vector<HostParticle> init_box_ensemble(int n_particles,
                                                    double mu_Q_gev,
                                                    const MixtureConfig& mix,
                                                    std::uint64_t seed) {
-    const auto probs = build_species_probabilities(
-        (2.0 * T_perp_gev + T_z_gev) / 3.0, mu_B_gev, mu_Q_gev, mix);
+    const double T_eff = (2.0 * T_perp_gev + T_z_gev) / 3.0;
+    const auto probs = build_species_probabilities(T_eff, mu_B_gev, mu_Q_gev, mix);
     std::vector<double> cdf(NUM_SPECIES, 0.0);
     double acc = 0.0;
     for (int i = 0; i < NUM_SPECIES; ++i) {
@@ -176,7 +286,9 @@ inline std::vector<HostParticle> init_box_ensemble(int n_particles,
         PhiloxRng rng(seed, 100ULL, static_cast<std::uint64_t>(i));
         const int sp_id = sample_species_from_cdf(cdf, rng);
         const SpeciesInfo sp = get_species_info(sp_id);
-        const double m = sp.pole_mass_gev;
+        const double m = (sp.is_excited && mix.use_breit_wigner)
+                             ? sample_thermal_breit_wigner_mass(sp_id, T_eff, rng)
+                             : sp.pole_mass_gev;
 
         HostParticle hp;
         hp.t = 0.0;
@@ -193,8 +305,6 @@ inline std::vector<HostParticle> init_box_ensemble(int n_particles,
             hp.py = p4.y;
             hp.pz = p4.z;
         } else {
-            // Anisotropic momentum initialization: draw transverse components at T_perp
-            // and longitudinal component at T_z, then place strictly on mass shell.
             const FourVector pt = sample_maxwell_juttner(m, T_perp_gev, rng);
             const FourVector pl = sample_maxwell_juttner(m, T_z_gev, rng);
             hp.px = pt.x;
@@ -207,7 +317,7 @@ inline std::vector<HostParticle> init_box_ensemble(int n_particles,
     return out;
 }
 
-// 2. Expanding 3D heavy-ion hadronic fireball with radial Hubble flow beta_r = beta_s * (r / R0)
+// 2. Expanding 3D heavy-ion hadronic fireball with radial Hubble flow beta_r = beta_s * tanh(r / R0)
 inline std::vector<HostParticle> init_expanding_fireball(int n_particles,
                                                          double radius_rms_fm,
                                                          double beta_surface,
@@ -232,14 +342,15 @@ inline std::vector<HostParticle> init_expanding_fireball(int n_particles,
         PhiloxRng rng(seed, 200ULL, static_cast<std::uint64_t>(i));
         const int sp_id = sample_species_from_cdf(cdf, rng);
         const SpeciesInfo sp = get_species_info(sp_id);
-        const double m = sp.pole_mass_gev;
+        const double m = (sp.is_excited && mix.use_breit_wigner)
+                             ? sample_thermal_breit_wigner_mass(sp_id, T_local_gev, rng)
+                             : sp.pole_mass_gev;
 
         const double x = sigma_r * rng.normal();
         const double y = sigma_r * rng.normal();
         const double z = sigma_r * rng.normal();
         const double r = std::sqrt(x * x + y * y + z * z);
 
-        // Smoothly saturating radial flow profile beta(r) = beta_s * tanh(r / R0)
         const double beta_mag =
             (r > 1.0e-9) ? (beta_surface * std::tanh(r / radius_rms_fm)) : 0.0;
         const double bx = (r > 1.0e-9) ? (beta_mag * x / r) : 0.0;
@@ -247,7 +358,6 @@ inline std::vector<HostParticle> init_expanding_fireball(int n_particles,
         const double bz = (r > 1.0e-9) ? (beta_mag * z / r) : 0.0;
         const double gamma = 1.0 / std::sqrt(1.0 - beta_mag * beta_mag);
 
-        // Local thermal 4-momentum boosted by collective radial flow velocity +beta
         const FourVector p_loc = sample_maxwell_juttner(m, T_local_gev, rng);
         const FourVector p_lab = lorentz_boost_from_cm(
             m, p_loc.t, p_loc.x, p_loc.y, p_loc.z, bx, by, bz, gamma);
@@ -277,8 +387,6 @@ inline std::vector<HostParticle> init_colliding_slabs(int n_particles,
                                                       double mu_Q_gev,
                                                       const MixtureConfig& mix,
                                                       std::uint64_t seed) {
-    // Use freeze-out chemical temperature (~55 MeV) for species abundances while keeping
-    // internal beam kinetic spread cold (T_internal_gev) so the two beams are well-collimated.
     const double T_chem = (T_internal_gev < 0.055) ? 0.055 : T_internal_gev;
     const auto probs = build_species_probabilities(T_chem, mu_B_gev, mu_Q_gev, mix);
     std::vector<double> cdf(NUM_SPECIES, 0.0);
@@ -302,7 +410,9 @@ inline std::vector<HostParticle> init_colliding_slabs(int n_particles,
         PhiloxRng rng(seed, 300ULL, static_cast<std::uint64_t>(i));
         const int sp_id = sample_species_from_cdf(cdf, rng);
         const SpeciesInfo sp = get_species_info(sp_id);
-        const double m = sp.pole_mass_gev;
+        const double m = (sp.is_excited && mix.use_breit_wigner)
+                             ? sample_thermal_breit_wigner_mass(sp_id, T_chem, rng)
+                             : sp.pole_mass_gev;
 
         const bool left_slab = (i % 2 == 0);
         const double x_center = left_slab ? (cx - 0.30 * Lx) : (cx + 0.30 * Lx);

@@ -159,4 +159,82 @@ HD_INLINE void scatter_elastic_2to2(const FourVector& p1_in, double m1,
     p2_out = lorentz_boost_from_cm(m2, E2_cm, -qx_cm, -qy_cm, -qz_cm, bx, by, bz, gamma);
 }
 
+// Exact CM breakup momentum p_cm(sqrt_s; ma, mb) for sqrt_s > ma + mb (0 otherwise)
+HD_INLINE double two_body_p_cm(double sqrt_s, double ma, double mb) {
+    const double m_sum = ma + mb;
+    if (sqrt_s <= m_sum) return 0.0;
+    const double m_diff = ::fabs(ma - mb);
+    const double lam = (sqrt_s - m_sum) * (sqrt_s + m_sum) *
+                       (sqrt_s - m_diff) * (sqrt_s + m_diff);
+    return (lam > 0.0) ? (0.5 * ::sqrt(lam) / sqrt_s) : 0.0;
+}
+
+// General 2 -> 2 scattering (elastic or inelastic) from (p1_in, m1) + (p2_in, m2)
+// into outgoing masses (m3, m4) at CM polar angle (cos_theta, phi) relative to incoming p1*.
+HD_INLINE void scatter_general_2to2(const FourVector& p1_in,
+                                    const FourVector& p2_in,
+                                    double sqrt_s,
+                                    double m3, double m4,
+                                    double p_cm_out,
+                                    double cos_theta, double phi,
+                                    FourVector& p3_out, FourVector& p4_out) {
+    const double E_tot = p1_in.t + p2_in.t;
+    const double Px_tot = p1_in.x + p2_in.x;
+    const double Py_tot = p1_in.y + p2_in.y;
+    const double Pz_tot = p1_in.z + p2_in.z;
+
+    const double inv_E = 1.0 / E_tot;
+    const double bx = Px_tot * inv_E;
+    const double by = Py_tot * inv_E;
+    const double bz = Pz_tot * inv_E;
+    const double gamma = E_tot / sqrt_s;
+
+    double p1x_cm, p1y_cm, p1z_cm;
+    lorentz_boost_to_cm(p1_in.t, p1_in.x, p1_in.y, p1_in.z, bx, by, bz, gamma,
+                        p1x_cm, p1y_cm, p1z_cm);
+
+    const double p1_norm = ::sqrt(p1x_cm * p1x_cm + p1y_cm * p1y_cm + p1z_cm * p1z_cm);
+    double nx = 0.0, ny = 0.0, nz = 1.0;
+    if (p1_norm > 1.0e-15) {
+        const double inv_norm = 1.0 / p1_norm;
+        nx = p1x_cm * inv_norm;
+        ny = p1y_cm * inv_norm;
+        nz = p1z_cm * inv_norm;
+    }
+
+    double qx_cm, qy_cm, qz_cm;
+    rotate_from_axis(nx, ny, nz, p_cm_out, cos_theta, phi, qx_cm, qy_cm, qz_cm);
+
+    const double E3_cm = ::sqrt(m3 * m3 + p_cm_out * p_cm_out);
+    const double E4_cm = ::sqrt(m4 * m4 + p_cm_out * p_cm_out);
+
+    p3_out = lorentz_boost_from_cm(m3, E3_cm,  qx_cm,  qy_cm,  qz_cm, bx, by, bz, gamma);
+    p4_out = lorentz_boost_from_cm(m4, E4_cm, -qx_cm, -qy_cm, -qz_cm, bx, by, bz, gamma);
+}
+
+// Isotropic 1 -> 2 resonance decay R(p_res, m_res) -> a(ma) + b(mb)
+HD_INLINE void decay_isotropic_1to2(const FourVector& p_res, double m_res,
+                                    double ma, double mb,
+                                    double cos_theta, double phi,
+                                    FourVector& pa_out, FourVector& pb_out) {
+    const double p_cm = two_body_p_cm(m_res, ma, mb);
+    const double sin_th = ::sqrt(
+        (1.0 - cos_theta * cos_theta > 0.0) ? (1.0 - cos_theta * cos_theta) : 0.0);
+    const double qx = p_cm * sin_th * ::cos(phi);
+    const double qy = p_cm * sin_th * ::sin(phi);
+    const double qz = p_cm * cos_theta;
+
+    const double Ea_cm = ::sqrt(ma * ma + p_cm * p_cm);
+    const double Eb_cm = ::sqrt(mb * mb + p_cm * p_cm);
+
+    const double inv_E = 1.0 / p_res.t;
+    const double bx = p_res.x * inv_E;
+    const double by = p_res.y * inv_E;
+    const double bz = p_res.z * inv_E;
+    const double gamma = p_res.t / m_res;
+
+    pa_out = lorentz_boost_from_cm(ma, Ea_cm,  qx,  qy,  qz, bx, by, bz, gamma);
+    pb_out = lorentz_boost_from_cm(mb, Eb_cm, -qx, -qy, -qz, bx, by, bz, gamma);
+}
+
 }  // namespace transport

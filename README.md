@@ -1,18 +1,32 @@
 # CUDA Relativistic Nucleon & Light-Cluster Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-6%2F6%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-10%2F10%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A GPU-native relativistic Boltzmann transport code written in **CUDA C++17** for **protons, neutrons, and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), starting with **covariant elastic $2 \to 2$ scattering**.
+A GPU-native relativistic Boltzmann transport code written in **CUDA C++17** for **protons, neutrons, and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **off-shell relativistic Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay, 46 reversible $2 \leftrightarrow 2$ inelastic nuclear transfer/catalysis/excitation channels with strict detailed balance, and Glauber elastic scattering**.
 
-When `nvcc` is present, all particle propagation, 3D spatial grid binning, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic binary collision kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
+When `nvcc` is present, all particle propagation, dynamic slot allocation/compaction, 3D spatial grid binning, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic reaction/decay kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
 
 ---
 
 ## Visual Demonstrations
 
-### 1. Counter-Streaming Nuclear & Excited-Cluster Slabs (`--mode slabs`)
+### 1. Dynamic Cluster Nucleosynthesis & Off-Shell Breit–Wigner Spectrum (`--mode nucleosynthesis`)
+Starting from **100% pure protons and neutrons ($N_{\text{clusters}}(0) = 0$)** in a periodic 3D box, the coupled $2 \leftrightarrow 1$ ($p+n \leftrightarrow d^*$, $p+t / n+{}^3\text{He} / d+d \leftrightarrow {}^4\text{He}^*$) and $2 \leftrightarrow 2$ ($N+d^* \leftrightarrow N+d$, $d+d \leftrightarrow p+t / n+{}^3\text{He}$, $d+t \leftrightarrow n+{}^4\text{He}$, $N+{}^4\text{He} \leftrightarrow N+{}^4\text{He}^*$) network dynamically synthesizes the full $A \le 4$ nuclear mass hierarchy while populating the thermal-folded relativistic Breit–Wigner spectral distribution:
+
+<p align="center">
+  <img src="assets/cluster_nucleosynthesis.gif" alt="Dynamic Light-Cluster Nucleosynthesis" width="100%">
+</p>
+
+### 2. Relativistic Breit–Wigner Spectral Functions & Threshold Widths (`--dump-bw`)
+Unit-normalized spectral functions $\mathcal{A}_R(m)$ and Blatt–Weisskopf momentum-dependent widths $\Gamma_{\text{tot}}(m) \propto q^{2L+1}$ across $s$-, $p$-, and $d$-wave resonances (`include/physics/resonances.cuh`):
+
+<p align="center">
+  <img src="assets/breit_wigner_spectra.png" alt="Relativistic Breit-Wigner Spectral Functions" width="100%">
+</p>
+
+### 3. Counter-Streaming Nuclear & Excited-Cluster Slabs (`--mode slabs`)
 Two opposing beams ($\beta_z = \pm 0.48c$) composed of nucleons ($p, n$), ground-state clusters ($d, t, {}^3\text{He}, {}^4\text{He}$), singlet dinucleons ($d^*$), and excited ${}^4\text{He}^*$ states collide head-on inside a 3D box. Bright yellow-white flashes mark active $2 \to 2$ elastic collision vertices in each step as longitudinal beam momentum splashes into transverse $4\pi$ thermal motion:
 
 <p align="center">
@@ -83,20 +97,23 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 │   ├── physics/
 │   │   ├── constants.cuh           # Physical constants & AME2020 nuclear masses (GeV, fm)
 │   │   ├── species.cuh             # 28-species nucleon + cluster + excited-state table
-│   │   ├── kinematics.cuh          # Cancellation-free Moller flux, CM boosts & 2->2 scattering
-│   │   └── cross_sections.cuh      # ERE+KK+Cugnon NN & Gaussian Glauber cluster cross sections
+│   │   ├── kinematics.cuh          # Cancellation-free Moller flux, CM boosts, 2->2 & 1->2 decays
+│   │   ├── cross_sections.cuh      # ERE+KK+Cugnon NN & Gaussian Glauber cluster cross sections
+│   │   ├── resonances.cuh          # Relativistic Breit-Wigner spectral functions & BW samplers
+│   │   └── inelastic_channels.cuh  # 46 reversible 2<->2 transfer, catalysis & excitation rules
 │   └── sim/
-│       ├── particles.cuh           # Coalesced Structure-of-Arrays (ParticleSoAView) GPU layout
+│       ├── particles.cuh           # Dynamic SoA layout with GPU atomic appends & compaction
 │       ├── grid.cuh                # GPU multi-level prefix sum + counting-sort 3D cell builder
-│       ├── stepper.cuh             # Strang-split drift + DisjointPairs / AllPairs CUDA kernels
-│       ├── init_conditions.cuh     # 4-Gamma Maxwell-Juttner sampler, box, slabs & fireball init
-│       └── observables.cuh         # Parallel GPU reductions for P^mu, B, Q, T^ij & species yields
+│       ├── stepper.cuh             # Strang-split drift + decay + DisjointPairs/AllPairs kernels
+│       ├── init_conditions.cuh     # Off-shell grand-canonical sampler, nucleosynthesis & fireball
+│       └── observables.cuh         # Parallel GPU reductions for P^mu, B, Q, T^ij & mass moments
 ├── src/
-│   ├── main.cu                     # CLI simulation driver, CSV logger & binary frame exporter
-│   └── tests.cu                    # 6-part automated physics & stochastic rate verification suite
+│   ├── main.cu                     # CLI simulation driver, CSV logger & binary/BW exporters
+│   └── tests.cu                    # Automated physics, detailed-balance & nucleosynthesis suite
 ├── scripts/
-│   └── generate_animations.py      # Reproduces all GIF/MP4 animations and cross-section figures
-└── assets/                         # Rendered animations and cross-section plots
+│   ├── generate_inelastic_animations.py
+│   └── generate_animations.py      # Reproduces all GIF/MP4 animations and physics figures
+└── assets/                         # Rendered animations and spectral/cross-section plots
 ```
 
 ### Stochastic Collision Kernel (`DisjointPairs` vs `AllPairs`)
@@ -123,22 +140,21 @@ ctest --test-dir build --output-on-failure -V
 
 ### 3. Run Simulations
 ```bash
-# Print all 28 species (ground & excited) and sample p + X elastic cross sections
+# Print all 28 species (ground & excited), thresholds, spectral norms, and cross sections
 ./build/cluster_transport --print-species
 
-# Counter-streaming nuclear & excited-cluster slabs
-./build/cluster_transport --mode slabs --npart 50000 --ntest 10 --steps 80 --dt 0.20
+# Dynamic nucleosynthesis of d, d*, t, 3He, 4He, and 4He* from pure p + n
+./build/cluster_transport --mode nucleosynthesis --npart 30000 --ntest 15 --steps 80 --dt 0.15
 
-# Anisotropic 3D periodic box relaxation
-./build/cluster_transport --mode aniso --npart 100000 --ntest 25 --steps 100 --dt 0.20
-
-# 3D radially expanding heavy-ion fireball
-./build/cluster_transport --mode fireball --npart 100000 --ntest 25 --steps 80 --dt 0.25
+# Run in pure elastic baseline mode (--reactions elastic) or full inelastic+BW mode (--reactions all)
+./build/cluster_transport --mode aniso --reactions all --npart 100000 --ntest 25 --steps 100 --dt 0.20
+./build/cluster_transport --mode fireball --reactions all --npart 100000 --ntest 25 --steps 80 --dt 0.25
 ```
 
 ### 4. Regenerate Animations & Figures
 Requires `python3` (`numpy`, `matplotlib`) and `ffmpeg`:
 ```bash
+python3 scripts/generate_inelastic_animations.py
 python3 scripts/generate_animations.py
 ```
 
@@ -146,16 +162,19 @@ python3 scripts/generate_animations.py
 
 ## Verification Suite
 
-[`src/tests.cu`](src/tests.cu) validates six core invariants on every build:
+[`src/tests.cu`](src/tests.cu) validates all physics and numerical invariants on every build:
 1. **`test_species_table`**: Quantum numbers ($B, Z, J^\pi, I, g=2J+1$), pole masses, widths, and radii across all 6 ground and 22 excited states.
-2. **`test_relativistic_kinematics`**: Boosted ($\beta \approx 0.77$) sub-keV threshold ${}^4\text{He}^*(20.21) + d^*(0^+)$ scattering conserving $P^\mu$ and mass-shell to $< 10^{-13}$.
+2. **`test_relativistic_kinematics`**: Boosted sub-keV threshold elastic, exothermic $2 \to 2$ ($d+t \to n+{}^4\text{He}$), and $1 \to 2$ resonance decay kinematics conserving $P^\mu$ to $< 10^{-13}$.
 3. **`test_cross_section_hierarchy`**: Verifies $\sigma_{pn} > \sigma_{pp}$, $\sigma_{p d^*} > \sigma_{p d}$, and $\sigma_{p\,{}^4\text{He}^*(20.21)} > \sigma_{p\,{}^4\text{He}}$.
-4. **`test_stochastic_boltzmann_rate`**: Benchmarks both `DisjointPairs` and `AllPairs` at odd cell occupancy ($N_c = 251$) against the exact analytical pair sum $\sum_{i<j} v_{\text{Møller}} \sigma_0 \Delta t / (N_{\text{test}} V)$.
-5. **`test_multispecies_isotropization`**: Multi-species shear relaxation $P_z/P_\perp: 3.96 \to 1.03$ with $|\Delta E|/E \sim 10^{-15}$.
-6. **`test_open_expanding_fireball`**: Radial Hubble expansion and vacuum boundary free-streaming with exact conservation laws.
+4. **`test_breit_wigner_spectral_properties`**: Verifies unit spectral normalization $\int \mathcal{A}_R(m)\,dm = 1$, exact threshold vanishing $\Gamma(m \le m_{\text{th}}) = 0$, and $(B, Q)$ conservation across all 22 resonances and 46 inelastic $2 \leftrightarrow 2$ channels.
+5. **`test_stochastic_boltzmann_rate`**: Benchmarks both `DisjointPairs` and `AllPairs` at odd cell occupancy ($N_c = 251$) against the exact analytical pair sum.
+6. **`test_detailed_balance_2to1_resonances`**: Verifies microscopic $2 \leftrightarrow 1$ detailed balance ($p+n \leftrightarrow d^*$: formations match decays within $<1\%$) and stationary off-shell $\langle m_{d^*} \rangle$ in a grand-canonical box.
+7. **`test_detailed_balance_full_chemical_network`**: Verifies chemical stationarity across all 28 species with all $2 \leftrightarrow 1$ and 46 $2 \leftrightarrow 2$ reactions simultaneously active.
+8. **`test_dynamic_cluster_nucleosynthesis`**: Verifies spontaneous nucleation of $d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and ${}^4\text{He}^*$ from pure $p+n$ with $|\Delta E|/E \sim 10^{-15}$.
+9. **`test_reactive_expanding_fireball`**: Radial Hubble expansion with coupled elastic, inelastic, and resonance decay dynamics.
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA
-- [ ] Breit–Wigner spectral functions and finite-lifetime resonance formation/decay ($d^* \leftrightarrow p + n$, ${}^4\text{He}^* \leftrightarrow p+t / n+{}^3\text{He} / d+d$)
-- [ ] Inelastic excitation / de-excitation channels ($N + {}^4\text{He} \leftrightarrow N + {}^4\text{He}^*$) with detailed balance
-- [ ] Pion/nucleon-catalyzed $2 \leftrightarrow 3$ cluster reactions ($N + N + N \leftrightarrow N + d$, $\pi + d \leftrightarrow \pi + p + n$)
+- [x] Relativistic Breit–Wigner spectral functions and $2 \leftrightarrow 1$ resonance formation/decay ($d^* \leftrightarrow N+N$, ${}^4\text{He}^* \leftrightarrow p+t / n+{}^3\text{He} / d+d$, ${}^4\text{H}^* \leftrightarrow n+t$, ${}^4\text{Li}^* \leftrightarrow p+{}^3\text{He}$)
+- [x] Reversible $2 \leftrightarrow 2$ nuclear transfer ($dd \leftrightarrow pt/n\,{}^3\text{He}$, $dt \leftrightarrow n\alpha$, $d\,{}^3\text{He} \leftrightarrow p\alpha$), deuteron catalysis ($N+d \leftrightarrow N+d^*$), and ${}^4\text{He} \leftrightarrow {}^4\text{He}^*$ excitation with off-shell detailed balance
+- [ ] Direct multi-pion & 3-body $2 \leftrightarrow 3$ channels ($\pi + d \leftrightarrow \pi + p + n$, $N + N + N \leftrightarrow N + d$) and nuclear mean-field potentials

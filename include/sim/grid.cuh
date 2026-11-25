@@ -80,6 +80,11 @@ constexpr int SCAN_BLOCK_SIZE = 256;
 __global__ void assign_and_count_cells_kernel(ParticleSoAView p, GridView g) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= p.n) return;
+    if (!p.active[i]) {
+        p.cell_id[i] = -1;
+        p.collided[i] = 0;
+        return;
+    }
 
     const int cid = compute_cell_id(p.x[i], p.y[i], p.z[i], g.cfg);
     p.cell_id[i] = cid;
@@ -173,7 +178,7 @@ public:
     }
 
     void build(ParticleSystem& particles) {
-        const int np = particles.size();
+        const int np = particles.slot_size();
         const int n_cells = cfg_.num_cells();
         if (static_cast<int>(sorted_indices_.size()) < np) {
             sorted_indices_.resize(np > 0 ? np : 1);
@@ -210,6 +215,11 @@ public:
         int* sorted = sorted_indices_.data();
 
         for (int i = 0; i < np; ++i) {
+            if (!pview.active[i]) {
+                pview.cell_id[i] = -1;
+                pview.collided[i] = 0;
+                continue;
+            }
             const int cid = detail::compute_cell_id(pview.x[i], pview.y[i], pview.z[i], cfg_);
             pview.cell_id[i] = cid;
             pview.collided[i] = 0;

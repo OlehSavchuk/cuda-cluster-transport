@@ -11,7 +11,9 @@
 #include "backend/cuda_compat.cuh"
 #include "physics/constants.cuh"
 #include "physics/cross_sections.cuh"
+#include "physics/inelastic_channels.cuh"
 #include "physics/kinematics.cuh"
+#include "physics/resonances.cuh"
 #include "physics/species.cuh"
 #include "sim/grid.cuh"
 #include "sim/init_conditions.cuh"
@@ -25,7 +27,7 @@ using namespace transport;
 
 #pragma pack(push, 1)
 struct FrameHeader {
-    std::uint32_t magic = 0x43545250U;  // "CTRP"
+    std::uint32_t magic = 0x43545232U;  // "CTR2"
     std::int32_t step = 0;
     std::int32_t n_saved = 0;
     std::int32_t n_total = 0;
@@ -33,7 +35,16 @@ struct FrameHeader {
     double E_tot_gev = 0.0;
     double aniso_pz_pt = 0.0;
     double rms_r_fm = 0.0;
-    std::uint64_t collisions_cum = 0;
+    std::uint64_t el_cum = 0;
+    std::uint64_t inel_cum = 0;
+    std::uint64_t form_cum = 0;
+    std::uint64_t decay_cum = 0;
+    std::int32_t count_nuc = 0;
+    std::int32_t count_d = 0;
+    std::int32_t count_dstar = 0;
+    std::int32_t count_a3 = 0;
+    std::int32_t count_he4 = 0;
+    std::int32_t count_a4star = 0;
     double box_xmin = 0.0, box_xmax = 0.0;
     double box_ymin = 0.0, box_ymax = 0.0;
     double box_zmin = 0.0, box_zmax = 0.0;
@@ -54,7 +65,7 @@ void write_binary_frame(const std::string& dump_dir,
                         double t_fm,
                         const GridConfig& gcfg,
                         const GlobalObservables& obs,
-                        unsigned long long collisions_cum,
+                        const StepStats& st,
                         const std::vector<HostParticle>& host_p,
                         int max_save) {
     std::filesystem::create_directories(dump_dir);
@@ -64,11 +75,13 @@ void write_binary_frame(const std::string& dump_dir,
     const int n_total = static_cast<int>(host_p.size());
     const int stride = (max_save > 0 && n_total > max_save) ? (n_total / max_save) : 1;
 
+    // Preserve rare clusters in visual subsample! Always save clusters/excited states first
+    // if room permits, then fill remaining quota with nucleons at uniform stride.
     std::vector<FrameParticleRecord> recs;
-    recs.reserve((max_save > 0 && max_save < n_total) ? max_save : n_total);
-    for (int i = 0; i < n_total; i += stride) {
-        if (max_save > 0 && static_cast<int>(recs.size()) >= max_save) break;
-        const HostParticle& hp = host_p[i];
+    const int cap = (max_save > 0 && max_save < n_total) ? max_save : n_total;
+    recs.reserve(cap);
+
+    auto push_rec = [&](const HostParticle& hp) {
         FrameParticleRecord r{};
         r.x = static_cast<float>(hp.x);
         r.y = static_cast<float>(hp.y);
@@ -81,17 +94,38 @@ void write_binary_frame(const std::string& dump_dir,
         r.species = static_cast<std::int16_t>(hp.species);
         r.collided = static_cast<std::int16_t>(hp.collided);
         recs.push_back(r);
+    };
+
+    if (stride == 1) {
+        for (int i = 0; i < n_total; ++i) push_rec(host_p[i]);
+    } else {
+        for (int i = 0; i < n_total; i += stride) {
+            if (static_cast<int>(recs.size()) >= cap) break;
+            push_rec(host_p[i]);
+        }
     }
+
+    int n_a4_exc = 0;
+    for (int id = HE4_2021; id < NUM_SPECIES; ++id) n_a4_exc += obs.counts[id];
 
     FrameHeader hdr{};
     hdr.step = step;
     hdr.n_saved = static_cast<std::int32_t>(recs.size());
-    hdr.n_total = n_total;
+    hdr.n_total = obs.n_active;
     hdr.t_fm = t_fm;
     hdr.E_tot_gev = obs.E_tot;
     hdr.aniso_pz_pt = obs.pressure_anisotropy();
-    hdr.rms_r_fm = obs.rms_radius(n_total);
-    hdr.collisions_cum = collisions_cum;
+    hdr.rms_r_fm = obs.rms_radius();
+    hdr.el_cum = st.collisions_elastic;
+    hdr.inel_cum = st.collisions_inelastic_2to2;
+    hdr.form_cum = st.formations_2to1;
+    hdr.decay_cum = st.decays_1to2;
+    hdr.count_nuc = obs.counts[PROTON] + obs.counts[NEUTRON];
+    hdr.count_d = obs.counts[DEUTERON];
+    hdr.count_dstar = obs.counts[D_STAR_NN] + obs.counts[D_STAR_PN] + obs.counts[D_STAR_PP];
+    hdr.count_a3 = obs.counts[TRITON] + obs.counts[HELION];
+    hdr.count_he4 = obs.counts[ALPHA];
+    hdr.count_a4star = n_a4_exc;
     hdr.box_xmin = gcfg.xmin; hdr.box_xmax = gcfg.xmax;
     hdr.box_ymin = gcfg.ymin; hdr.box_ymax = gcfg.ymax;
     hdr.box_zmin = gcfg.zmin; hdr.box_zmax = gcfg.zmax;
@@ -120,7 +154,7 @@ void dump_cross_section_curves(const std::string& path, const CrossSectionConfig
     constexpr int N_PTS = 200;
     for (int i = 0; i < N_PTS; ++i) {
         const double frac = static_cast<double>(i) / static_cast<double>(N_PTS - 1);
-        const double p_lab = 0.04 * std::pow(75.0, frac);  // 0.04 to 3.0 GeV/c log-spaced
+        const double p_lab = 0.04 * std::pow(75.0, frac);
         f << p_lab << ","
           << eval_pair(PROTON, PROTON, p_lab) << ","
           << eval_pair(PROTON, NEUTRON, p_lab) << ","
@@ -133,12 +167,35 @@ void dump_cross_section_curves(const std::string& path, const CrossSectionConfig
     }
 }
 
+void dump_breit_wigner_curves(const std::string& path) {
+    const SpectralNormTable norms = compute_spectral_norm_table();
+    std::ofstream f(path);
+    f << "species_id,name,m_gev,dm_above_th_mev,A_gev_inv,gamma_tot_mev\n";
+
+    const int showcase_ids[] = {D_STAR_PN, HE4_2021, HE4_2184, HE4_2425, HE4_2595, HE4_2742, H4_RES};
+    for (int id : showcase_ids) {
+        const double m_min = resonance_min_mass(id);
+        const double m_0 = get_species_info(id).pole_mass_gev;
+        const double m_hi = m_0 + 0.045;  // Up to 45 MeV above pole for clean plotting
+        constexpr int N_PTS = 300;
+        for (int k = 0; k < N_PTS; ++k) {
+            const double m = m_min + (m_hi - m_min) * (static_cast<double>(k) + 0.5) / N_PTS;
+            const double A = spectral_function(id, m, norms);
+            const double gam_mev = total_width_gev(id, m) * 1.0e3;
+            f << id << "," << get_species_name(id) << ","
+              << m << "," << (m - m_min) * 1.0e3 << ","
+              << A << "," << gam_mev << "\n";
+        }
+    }
+}
+
 void print_species_catalog(const CrossSectionConfig& xs_cfg) {
-    std::printf("\n=== Nucleon & Light-Cluster Species Catalog (A <= 4, Ground & Excited) ===\n");
-    std::printf("%-4s %-13s %2s %2s %5s %3s %2s %10s %8s %9s %7s %11s\n",
-                "ID", "Name", "A", "Z", "J^P", "2I", "g", "Mass[GeV]",
-                "Ex[MeV]", "Gam[MeV]", "R[fm]", "sig_pX[mb]");
-    std::printf("-------------------------------------------------------------------------------------\n");
+    const SpectralNormTable norms = compute_spectral_norm_table();
+    std::printf("\n=== Nucleon & Light-Cluster Species Catalog (A <= 4, Breit-Wigner Spectral Enabled) ===\n");
+    std::printf("%-3s %-13s %2s %2s %5s %2s %10s %10s %8s %7s %9s\n",
+                "ID", "Name", "A", "Z", "J^P", "g", "Pole[GeV]", "m_th[GeV]",
+                "Gam[MeV]", "N_raw", "sig_pX[mb]");
+    std::printf("---------------------------------------------------------------------------------------\n");
 
     const double mp = phys::MASS_PROTON;
     const double p_beam = 0.50;
@@ -161,37 +218,41 @@ void print_species_catalog(const CrossSectionConfig& xs_cfg) {
                           sp.two_J, (sp.parity > 0) ? '+' : '-');
         }
 
-        std::printf("%-4d %-13s %2d %2d %5s %3d %2d %10.6f %8.2f %9.2f %7.2f %11.2f\n",
-                    sp.id, get_species_name(id), sp.baryon_num, sp.charge, jp_buf, sp.two_I,
-                    sp.degeneracy, sp.pole_mass_gev, sp.excitation_mev,
-                    sp.width_gev * 1.0e3, sp.rms_radius_fm, sig_mb);
+        std::printf("%-3d %-13s %2d %2d %5s %2d %10.6f %10.6f %8.2f %7.4f %9.2f\n",
+                    sp.id, get_species_name(id), sp.baryon_num, sp.charge, jp_buf,
+                    sp.degeneracy, sp.pole_mass_gev, resonance_min_mass(id),
+                    sp.width_gev * 1.0e3, norms.norm[id], sig_mb);
     }
-    std::printf("  * sig_pX[mb] evaluated for p (p_lab = 0.50 GeV/c) + X(at rest)\n\n");
+    std::printf("\n");
 }
 
 void print_usage(const char* prog) {
     std::printf(
         "Usage: %s [options]\n"
-        "  --mode <aniso|box|fireball|slabs>  Simulation scenario (default: aniso)\n"
-        "  --npart <int>                      Total test particles (default: 32000)\n"
-        "  --ntest <int>                      Test-particle oversampling N_test (default: 25)\n"
+        "  --mode <aniso|box|fireball|slabs|nucleosynthesis>\n"
+        "                                     Simulation scenario (default: nucleosynthesis)\n"
+        "  --reactions <all|elastic>          Enable full inelastic+BW network or elastic only\n"
+        "  --inelastic-scale <float>          Scale factor on 2<->2 inelastic couplings (default: 1.0)\n"
+        "  --npart <int>                      Initial test particles (default: 32000)\n"
+        "  --ntest <int>                      Test-particle oversampling N_test (default: 20)\n"
         "  --steps <int>                      Number of time steps (default: 100)\n"
         "  --dt <float>                       Time step [fm/c] (default: 0.20)\n"
         "  --substeps <int>                   Collision substeps per dt (default: 2)\n"
-        "  --box <float>                      Box length L [fm] (default: 24.0)\n"
-        "  --grid <int>                       Grid cells per axis Nx=Ny=Nz (default: 12)\n"
-        "  --temp <float>                     Temperature T [MeV] (default: 50.0)\n"
-        "  --cluster-boost <float>            Statistical cluster boost (default: 2.5)\n"
-        "  --excited-boost <float>            Statistical excited-state boost (default: 4.0)\n"
-        "  --xs <glauber|const>               Cross-section model (default: glauber)\n"
-        "  --sigma-mb <float>                 Constant cross section [mb] (default: 40.0)\n"
-        "  --ang <forward|iso>                Angular distribution (default: forward)\n"
+        "  --box <float>                      Box length L [fm] (default: 20.0)\n"
+        "  --grid <int>                       Grid cells per axis Nx=Ny=Nz (default: 10)\n"
+        "  --temp <float>                     Temperature T [MeV] (default: 55.0)\n"
+        "  --cluster-boost <float>            Initial statistical cluster boost (default: 1.0)\n"
+        "  --excited-boost <float>            Initial statistical excited boost (default: 1.0)\n"
+        "  --xs <glauber|const>               Elastic cross-section model (default: glauber)\n"
+        "  --sigma-mb <float>                 Constant elastic cross section [mb] (default: 40.0)\n"
+        "  --ang <forward|iso>                Elastic angular distribution (default: forward)\n"
         "  --scheme <disjoint|allpairs>       Cell collision kernel (default: disjoint)\n"
         "  --csv <path>                       Write time-series observables to CSV\n"
         "  --dump-dir <dir>                   Write binary particle trajectory frames\n"
         "  --dump-every <int>                 Steps between trajectory frames (default: 1)\n"
         "  --dump-limit <int>                 Max particles saved per frame (default: 4000)\n"
-        "  --dump-xs <csv_path>               Export cross-section curves vs p_lab and exit\n"
+        "  --dump-xs <csv_path>               Export elastic cross-section curves and exit\n"
+        "  --dump-bw <csv_path>               Export Breit-Wigner spectral curves and exit\n"
         "  --print-species                    Print full 28-species catalog and exit\n"
         "  --help                             Show this help message\n",
         prog);
@@ -202,22 +263,25 @@ void print_usage(const char* prog) {
 int main(int argc, char** argv) {
     using namespace transport;
 
-    std::string mode = "aniso";
+    std::string mode = "nucleosynthesis";
+    std::string rxn_mode = "all";
+    double inelastic_scale = 1.0;
     int n_particles = 32000;
-    int n_test = 25;
+    int n_test = 20;
     int n_steps = 100;
     double dt_fm = 0.20;
     int substeps = 2;
-    double box_L = 24.0;
-    int grid_n = 12;
-    double temp_mev = 50.0;
-    double cluster_boost = 2.5;
-    double excited_boost = 4.0;
+    double box_L = 20.0;
+    int grid_n = 10;
+    double temp_mev = 55.0;
+    double cluster_boost = 1.0;
+    double excited_boost = 1.0;
     std::string csv_path;
     std::string dump_dir;
     int dump_every = 1;
     int dump_limit = 4000;
     std::string dump_xs_path;
+    std::string dump_bw_path;
     bool only_print_species = false;
 
     CrossSectionConfig xs_cfg{};
@@ -234,6 +298,10 @@ int main(int argc, char** argv) {
         };
         if (arg == "--mode") {
             mode = next_str();
+        } else if (arg == "--reactions") {
+            rxn_mode = next_str();
+        } else if (arg == "--inelastic-scale") {
+            inelastic_scale = std::stod(next_str());
         } else if (arg == "--npart") {
             n_particles = std::stoi(next_str());
         } else if (arg == "--ntest") {
@@ -278,6 +346,8 @@ int main(int argc, char** argv) {
             dump_limit = std::stoi(next_str());
         } else if (arg == "--dump-xs") {
             dump_xs_path = next_str();
+        } else if (arg == "--dump-bw") {
+            dump_bw_path = next_str();
         } else if (arg == "--print-species") {
             only_print_species = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -298,10 +368,20 @@ int main(int argc, char** argv) {
         dump_cross_section_curves(dump_xs_path, xs_cfg);
         return 0;
     }
+    if (!dump_bw_path.empty()) {
+        dump_breit_wigner_curves(dump_bw_path);
+        return 0;
+    }
 
     step_cfg.dt_fm = dt_fm;
     step_cfg.n_test = n_test;
     step_cfg.collision_substeps = substeps;
+
+    ReactionConfig rxn_cfg{};
+    rxn_cfg.enable_elastic = true;
+    rxn_cfg.enable_inelastic_2to2 = (rxn_mode != "elastic");
+    rxn_cfg.enable_resonance_2to1_and_decays = (rxn_mode != "elastic");
+    rxn_cfg.inelastic_scale = inelastic_scale;
 
     GridConfig gcfg{};
     gcfg.nx = grid_n;
@@ -309,15 +389,27 @@ int main(int argc, char** argv) {
     gcfg.nz = grid_n;
 
     MixtureConfig mix{};
+    mix.use_breit_wigner = (rxn_mode != "elastic");
     mix.cluster_yield_boost = cluster_boost;
     mix.excited_yield_boost = excited_boost;
 
     const double T_gev = temp_mev * phys::MEV_TO_GEV;
-    const double mu_B_gev = 0.720;
-    const double mu_Q_gev = -0.008;
+    const double mu_B_gev = 0.780;
+    const double mu_Q_gev = -0.006;
 
     std::vector<HostParticle> host_init;
-    if (mode == "fireball") {
+    if (mode == "nucleosynthesis") {
+        // Start from 100% pure protons & neutrons and nucleate d, d*, t, 3He, 4He, 4He* dynamically!
+        gcfg.boundary = BoundaryMode::PeriodicBox;
+        gcfg.xmin = 0.0; gcfg.xmax = box_L;
+        gcfg.ymin = 0.0; gcfg.ymax = box_L;
+        gcfg.zmin = 0.0; gcfg.zmax = box_L;
+        mix.include_ground_clusters = false;
+        mix.include_excited_dstar = false;
+        mix.include_excited_he4 = false;
+        host_init = init_box_ensemble(
+            n_particles, gcfg, T_gev, T_gev, mu_B_gev, mu_Q_gev, mix, step_cfg.seed);
+    } else if (mode == "fireball") {
         gcfg.boundary = BoundaryMode::OpenExpanding;
         const double half_L = 1.5 * box_L;
         gcfg.xmin = -half_L; gcfg.xmax = half_L;
@@ -351,51 +443,41 @@ int main(int argc, char** argv) {
             mu_B_gev, mu_Q_gev, mix, step_cfg.seed);
     }
 
-    std::printf("===========================================================================\n");
-    std::printf(" CUDA Relativistic Nucleon & Light-Cluster Transport (Elastic 2 -> 2)\n");
-    std::printf("===========================================================================\n");
+    std::printf("=======================================================================================\n");
+    std::printf(" CUDA Relativistic Nucleon & Cluster Transport (Elastic + Inelastic + Breit-Wigner)\n");
+    std::printf("=======================================================================================\n");
     std::printf(" Backend        : %s\n", backend_description().c_str());
-    std::printf(" Scenario       : %s (%s)\n", mode.c_str(),
-                (gcfg.boundary == BoundaryMode::PeriodicBox) ? "3D Periodic Box" : "Open Expanding");
-    std::printf(" Particles      : %d test particles (N_test = %d -> %.1f physical particles)\n",
-                n_particles, n_test, static_cast<double>(n_particles) / n_test);
+    std::printf(" Scenario       : %s (%s) | Reactions: %s\n",
+                mode.c_str(),
+                (gcfg.boundary == BoundaryMode::PeriodicBox) ? "3D Periodic Box" : "Open Expanding",
+                rxn_cfg.enable_inelastic_2to2 ? "Elastic + 2<->2 Inelastic + 2<->1 BW Resonances" : "Elastic Only");
+    std::printf(" Initial N_part : %d test particles (N_test = %d)\n", n_particles, n_test);
     std::printf(" Grid           : %dx%dx%d = %d cells, dV = %.3f fm^3\n",
                 gcfg.nx, gcfg.ny, gcfg.nz, gcfg.num_cells(), gcfg.cell_volume_fm3());
     std::printf(" Time Stepping  : %d steps, dt = %.3f fm/c (%d substeps/step), scheme = %s\n",
                 n_steps, dt_fm, substeps,
                 (step_cfg.scheme == CollisionScheme::DisjointPairs) ? "DisjointPairs" : "AllPairs");
-    std::printf(" Cross Sections : %s (%s)\n",
-                (xs_cfg.model == CrossSectionModel::ParametricGlauber) ? "ERE+KK+Cugnon+Glauber" : "Constant",
-                (xs_cfg.angular_mode == AngularMode::ForwardDiffractive) ? "ForwardDiffractive" : "Isotropic");
+    std::printf("=======================================================================================\n");
+    std::printf("%5s %7s %7s %7s %6s %6s %5s %6s %9s %8s %8s %8s\n",
+                "Step", "t[fm/c]", "N(p,n)", "d", "d*", "t+3He", "4He", "4He*",
+                "Elast", "Inel22", "Form21", "Decay12");
+    std::printf("---------------------------------------------------------------------------------------\n");
 
     ParticleSystem particles;
     particles.upload(host_init);
 
     SpatialGrid grid(gcfg);
-    TransportStepper stepper(step_cfg, xs_cfg);
+    TransportStepper stepper(step_cfg, xs_cfg, rxn_cfg);
     ObservableCalculator obs_calc;
 
     const GlobalObservables obs0 = obs_calc.compute(particles);
 
-    int n_nuc = obs0.counts[PROTON] + obs0.counts[NEUTRON];
-    int n_d = obs0.counts[DEUTERON];
-    int n_dstar = obs0.counts[D_STAR_NN] + obs0.counts[D_STAR_PN] + obs0.counts[D_STAR_PP];
-    int n_a3 = obs0.counts[TRITON] + obs0.counts[HELION];
-    int n_he4_gs = obs0.counts[ALPHA];
-    int n_a4_exc = 0;
-    for (int id = HE4_2021; id < NUM_SPECIES; ++id) n_a4_exc += obs0.counts[id];
-
-    std::printf(" Initial Yields : N(p,n)=%d | d=%d, d*=%d | (t,3He)=%d | 4He=%d, A=4*(19 states)=%d\n",
-                n_nuc, n_d, n_dstar, n_a3, n_he4_gs, n_a4_exc);
-    std::printf("===========================================================================\n");
-    std::printf("%6s %8s %13s %10s %10s %12s %9s\n",
-                "Step", "t[fm/c]", "E_tot[GeV]", "Pz/P_perp", "R_rms[fm]", "Collisions", "Max(P22)");
-    std::printf("---------------------------------------------------------------------------\n");
-
     std::ofstream csv;
     if (!csv_path.empty()) {
         csv.open(csv_path);
-        csv << "step,t_fm,E_tot_gev,Px_tot,Py_tot,Pz_tot,Pz_over_Pperp,R_rms_fm,collisions_cum,max_P22\n";
+        csv << "step,t_fm,n_active,E_tot_gev,Pz_over_Pperp,R_rms_fm,"
+               "n_nuc,n_d,n_dstar,n_a3,n_he4,n_a4star,"
+               "el_cum,inel22_cum,form21_cum,decay12_cum,max_P\n";
     }
 
     const int report_every = (n_steps >= 10) ? (n_steps / 10) : 1;
@@ -411,23 +493,34 @@ int main(int argc, char** argv) {
             const StepStats st = stepper.read_stats();
             const double t_now = step * dt_fm;
 
+            const int n_nuc = obs.counts[PROTON] + obs.counts[NEUTRON];
+            const int n_d = obs.counts[DEUTERON];
+            const int n_dstar = obs.counts[D_STAR_NN] + obs.counts[D_STAR_PN] + obs.counts[D_STAR_PP];
+            const int n_a3 = obs.counts[TRITON] + obs.counts[HELION];
+            const int n_he4 = obs.counts[ALPHA];
+            int n_a4_exc = 0;
+            for (int id = HE4_2021; id < NUM_SPECIES; ++id) n_a4_exc += obs.counts[id];
+
             if (step % report_every == 0 || step == n_steps) {
-                std::printf("%6d %8.2f %13.6f %10.4f %10.4f %12llu %9.4f\n",
-                            step, t_now, obs.E_tot, obs.pressure_anisotropy(),
-                            obs.rms_radius(n_particles), st.collisions_accepted, st.max_prob_seen);
+                std::printf("%5d %7.2f %7d %7d %6d %6d %5d %6d %9llu %8llu %8llu %8llu\n",
+                            step, t_now, n_nuc, n_d, n_dstar, n_a3, n_he4, n_a4_exc,
+                            st.collisions_elastic, st.collisions_inelastic_2to2,
+                            st.formations_2to1, st.decays_1to2);
 
                 if (csv.is_open()) {
-                    csv << step << "," << t_now << "," << obs.E_tot << ","
-                        << obs.Px_tot << "," << obs.Py_tot << "," << obs.Pz_tot << ","
-                        << obs.pressure_anisotropy() << "," << obs.rms_radius(n_particles) << ","
-                        << st.collisions_accepted << "," << st.max_prob_seen << "\n";
+                    csv << step << "," << t_now << "," << obs.n_active << ","
+                        << obs.E_tot << "," << obs.pressure_anisotropy() << "," << obs.rms_radius() << ","
+                        << n_nuc << "," << n_d << "," << n_dstar << ","
+                        << n_a3 << "," << n_he4 << "," << n_a4_exc << ","
+                        << st.collisions_elastic << "," << st.collisions_inelastic_2to2 << ","
+                        << st.formations_2to1 << "," << st.decays_1to2 << "," << st.max_prob_seen << "\n";
                 }
             }
 
             if (!dump_dir.empty() && (step % dump_every == 0)) {
                 const auto host_snap = particles.download();
                 write_binary_frame(dump_dir, frame_idx++, step, t_now, gcfg,
-                                   obs, st.collisions_accepted, host_snap, dump_limit);
+                                   obs, st, host_snap, dump_limit);
             }
         }
 
@@ -449,16 +542,17 @@ int main(int argc, char** argv) {
         (obs_final.Py_tot - obs0.Py_tot) * (obs_final.Py_tot - obs0.Py_tot) +
         (obs_final.Pz_tot - obs0.Pz_tot) * (obs_final.Pz_tot - obs0.Pz_tot));
 
-    std::printf("---------------------------------------------------------------------------\n");
+    std::printf("---------------------------------------------------------------------------------------\n");
     std::printf(" Conservation   : |dE|/E = %.3e | |dP| = %.3e GeV/c | dB = %lld | dQ = %lld\n",
                 rel_dE, dP_mag,
                 obs_final.baryon_tot - obs0.baryon_tot,
                 obs_final.charge_tot - obs0.charge_tot);
-    std::printf(" Collision Stat : %llu elastic scatters out of %llu candidate pairs (overflows: %llu)\n",
-                final_stats.collisions_accepted, final_stats.pairs_tested, final_stats.prob_overflows);
+    std::printf(" Max Prob Seen  : %.4f (overflows: %llu) | Active Particles: %d -> %d\n",
+                final_stats.max_prob_seen, final_stats.prob_overflows,
+                obs0.n_active, obs_final.n_active);
     std::printf(" Wall Time      : %.3f s (%.2f ms/step)\n",
                 elapsed_s, 1000.0 * elapsed_s / (n_steps > 0 ? n_steps : 1));
-    std::printf("===========================================================================\n");
+    std::printf("=======================================================================================\n");
 
     return 0;
 }
