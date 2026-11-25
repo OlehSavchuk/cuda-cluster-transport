@@ -12,8 +12,15 @@ When `nvcc` is present, all particle propagation, dynamic slot allocation/compac
 
 ## Visual Demonstrations
 
-### 1. Dynamic Cluster Nucleosynthesis & Off-Shell Breit–Wigner Spectrum (`--mode nucleosynthesis`)
-Starting from **100% pure protons and neutrons ($N_{\text{clusters}}(0) = 0$)** in a periodic 3D box, the coupled $2 \leftrightarrow 1$ ($p+n \leftrightarrow d^*$, $p+t / n+{}^3\text{He} / d+d \leftrightarrow {}^4\text{He}^*$) and $2 \leftrightarrow 2$ ($N+d^* \leftrightarrow N+d$, $d+d \leftrightarrow p+t / n+{}^3\text{He}$, $d+t \leftrightarrow n+{}^4\text{He}$, $N+{}^4\text{He} \leftrightarrow N+{}^4\text{He}^*$) network dynamically synthesizes the full $A \le 4$ nuclear mass hierarchy while populating the thermal-folded relativistic Breit–Wigner spectral distribution:
+### 1. Sub-Saturation Cluster Nucleation at $\rho_B = n_0 / 8$, $T_{\text{start}} = 20\;\text{MeV}$
+Starting from **100% pure protons and neutrons** at nuclear sub-saturation density $\rho_B = n_0 / 8 = 0.02\;\text{fm}^{-3}$ ($L = 30\;\text{fm}, N_{\text{test}} = 60$, zero probability overflows) and $T_{\text{start}} = 20.0\;\text{MeV}$, nearly **45% of all baryons** assemble into bound and resonant clusters ($d, d^*, t, {}^3\text{He}, {}^4\text{He}, {}^4\text{He}^*$)—exhibiting a BBN-like transient deuteron overshoot before converging onto the dashed analytical Saha / SHM equilibrium targets while self-heating the isolated box via cluster formation:
+
+<p align="center">
+  <img src="assets/nucleation_n0_over_8_T20MeV.gif" alt="Cluster Nucleation at n0/8 and T=20 MeV" width="100%">
+</p>
+
+### 2. High-Density Nucleosynthesis & Off-Shell Breit–Wigner Spectrum (`--mode nucleosynthesis`)
+Starting from **100% pure protons and neutrons ($N_{\text{clusters}}(0) = 0$)** in a dense periodic box ($T_0 = 62\;\text{MeV}$), the coupled $2 \leftrightarrow 1$ and $2 \leftrightarrow 2$ network synthesizes the $A \le 4$ hierarchy while populating the thermal-folded Breit–Wigner spectral distribution:
 
 <p align="center">
   <img src="assets/cluster_nucleosynthesis.gif" alt="Dynamic Light-Cluster Nucleosynthesis" width="100%">
