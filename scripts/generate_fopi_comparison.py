@@ -117,9 +117,9 @@ def make_comparison_figure():
     )
     fig.text(
         0.5, 0.930,
-        "FOPI Collaboration Data: W. Reisdorf et al., Nucl. Phys. A 848 (2010) 366 & Nucl. Phys. A 876 (2012) 1   |   "
-        "Transport: Skyrme + Lorentzian MD (MD-Soft K₀=215 MeV vs. MD-Stiff K₀=380 MeV)",
-        ha="center", fontsize=9.2, color=TEXT_DIM
+        "FOPI Data: W. Reisdorf et al., NPA 848 (2010) 366 & NPA 876 (2012) 1   |   "
+        "High-Stat Ensemble: 5,000 Events/EOS (1.97M Test Nucleons, b·db Centrality, Exact MD Conservation)",
+        ha="center", fontsize=9.1, color=TEXT_DIM
     )
     yg_v1 = np.linspace(-1.05, 1.05, 120)
     yg_v2 = np.linspace(-1.02, 1.02, 120)
@@ -149,12 +149,12 @@ def make_comparison_figure():
     ax.grid(True)
     ax.legend(loc="upper left", fontsize=7.5, ncol=2, facecolor=PANEL_BG, edgecolor=GRID_COL)
 
-    # Panel (b): Directed flow v1(y0) — A=3 (t / 3He) & 4He
+    # Panel (b): Directed flow v1(y0) — Tritons (t) & 4He
     ax = axes[0, 1]
     ax.axhline(0.0, color=TEXT_DIM, lw=0.8, alpha=0.6)
     for sp_exp, sp_sim, vkey, ekey, ckey, lbl, sim_lbl, col, mk, min_c in [
-        ("t",   "A3",  "v1_ut08", "v1_ut08_err", "n_ut08", "FOPI t (A=3)",   "MD-Soft A=3 (ut0>0.8)", COL_T,   "^", 14.0),
-        ("4He", "4He", "v1",      "v1_err",      "n_stat", "FOPI ⁴He (A=4)", "MD-Soft ⁴He (all pT)",  COL_HE4, "D", 14.0),
+        ("t",   "t",   "v1_ut08", "v1_ut08_err", "n_ut08", "FOPI t (A=3)",   "MD-Soft t (ut0>0.8)",   COL_T,   "^", 20.0),
+        ("4He", "4He", "v1",      "v1_err",      "n_stat", "FOPI ⁴He (A=4)", "MD-Soft ⁴He (all pT)",  COL_HE4, "D", 25.0),
     ]:
         d_exp = fopi["v1_y0_ut0_gt_08"][sp_exp]
         ax.errorbar([x["y0"] for x in d_exp], [x["v1"] for x in d_exp], yerr=[x["err"] for x in d_exp],
@@ -162,14 +162,14 @@ def make_comparison_figure():
         ys, vs, es = sym_curve(rap_s[sp_sim], vkey, ekey, ckey, odd=True, min_n=min_c)
         yh, vh, eh = sym_curve(rap_h[sp_sim], vkey, ekey, ckey, odd=True, min_n=min_c)
         m = np.abs(ys) <= 1.06
-        ax.errorbar(ys[m], vs[m], yerr=es[m], fmt=".", ms=4.2, color=col, alpha=0.45, elinewidth=0.8)
+        ax.errorbar(ys[m], vs[m], yerr=es[m], fmt=".", ms=4.8, color=col, alpha=0.68, elinewidth=0.9)
         fs, fes = poly_fit_band(ys[m], vs[m], es[m], [1, 3], yg_v1)
         ax.plot(yg_v1, fs, "-", lw=2.2, color=col, label=sim_lbl)
         ax.fill_between(yg_v1, fs - fes, fs + fes, color=col, alpha=0.15)
-        if sp_sim == "A3":
+        if sp_sim == "t":
             mh = np.abs(yh) <= 1.06
             fh, _ = poly_fit_band(yh[mh], vh[mh], eh[mh], [1, 3], yg_v1)
-            ax.plot(yg_v1, fh, "--", lw=1.6, color=col, alpha=0.85, label="MD-Stiff A=3 (ut0>0.8)")
+            ax.plot(yg_v1, fh, "--", lw=1.6, color=col, alpha=0.85, label="MD-Stiff t (ut0>0.8)")
     ax.set_xlim(-1.12, 1.12)
     ax.set_ylim(-0.82, 0.82)
     ax.set_xlabel(r"Scaled Rapidity $y_0 = y / y_{\rm proj}$")
@@ -232,14 +232,14 @@ def make_comparison_figure():
     ax.grid(True)
     ax.legend(loc="lower left", fontsize=7.9, facecolor=PANEL_BG, edgecolor=GRID_COL)
 
-    # Panel (e): Isotope Scaling of Differential v2(u_t0) — p, d, A=3 (|y0| < 0.4)
+    # Panel (e): Isotope Scaling of Differential v2(u_t0) — p, d, t (|y0| < 0.4)
     ax = axes[1, 1]
     ax.axhline(0.0, color=TEXT_DIM, lw=0.8, alpha=0.6)
     ax.axvline(0.8, color=TEXT_DIM, ls=":", lw=1.0, alpha=0.7)
     for sp_e, sp_s, lbl, col, mk, min_u, umax in [
-        ("p", "p",  "p",   COL_P, "o", 25, 2.0),
-        ("d", "d",  "d",   COL_D, "s", 18, 1.75),
-        ("t", "A3", "A=3", COL_T, "^", 12, 1.35),
+        ("p", "p", "p", COL_P, "o", 40, 2.0),
+        ("d", "d", "d", COL_D, "s", 25, 1.85),
+        ("t", "t", "t", COL_T, "^", 18, 1.45),
     ]:
         de = fopi["v2_ut0_y0_lt_04"][sp_e]
         ax.errorbar([x["ut0"] for x in de], [x["v2"] for x in de], yerr=[x["err"] for x in de],
@@ -249,7 +249,7 @@ def make_comparison_figure():
         u = np.array([r["ut0"] for r in pts])
         v = np.array([r["v2"] for r in pts])
         e = np.array([r["v2_err"] for r in pts])
-        ax.errorbar(u, v, yerr=e, fmt=".", ms=4.0, color=col, alpha=0.40, elinewidth=0.8)
+        ax.errorbar(u, v, yerr=e, fmt=".", ms=4.6, color=col, alpha=0.68, elinewidth=0.9)
         ug_i = np.linspace(0.05, umax, 80)
         fu, feu = poly_fit_band(u, v, e, [1, 2], ug_i)
         ax.plot(ug_i, fu, "-", lw=2.2, color=col, label=f"MD-Soft {lbl}")

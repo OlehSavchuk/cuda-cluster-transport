@@ -412,6 +412,8 @@ int main(int argc, char** argv) {
             const std::string v = next_str();
             step_cfg.scheme = (v == "allpairs") ? CollisionScheme::AllPairs
                                                 : CollisionScheme::DisjointPairs;
+        } else if (arg == "--seed") {
+            step_cfg.seed = std::stoull(next_str());
         } else if (arg == "--csv") {
             csv_path = next_str();
         } else if (arg == "--dump-dir") {

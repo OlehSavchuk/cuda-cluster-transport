@@ -366,7 +366,9 @@ def make_fopi_flow_plot(flow_csv: Path):
 
 
 if __name__ == "__main__":
+    import sys
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     style_dark()
-    make_auau_collision_animation(OUT_DIR / "auau250_hydro", OUT_DIR / "auau250_frames")
+    if "--flow-only" not in sys.argv:
+        make_auau_collision_animation(OUT_DIR / "auau250_hydro", OUT_DIR / "auau250_frames")
     make_fopi_flow_plot(OUT_DIR / "fopi_auau250_flow.csv")
