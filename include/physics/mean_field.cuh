@@ -450,12 +450,36 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
         const double qx = p.px[i] / A - pfx;
         const double qy = p.py[i] / A - pfy;
         const double qz = p.pz[i] / A - pfz;
-        const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) /
-                                   (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
+        const double inv_lam2 = 1.0 / (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
+        const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2;
         const double md_coef = -A / denom;
         fx += md_coef * gmdx;
         fy += md_coef * gmdy;
         fz += md_coef * gmdz;
+
+        // Product-rule force from spatial variation of local collective frame p_f(r) = Pi(r)/rho_B(r)
+        const double rho_loc = u_loc * mf.cfg.rho0_fm3;
+        if (rho_loc > 1.0e-4) {
+            const double u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
+            double grpx, grpy, grpz, grnx, grny, grnz;
+            sample_cic_grad(mf.rho_p, x, y, z, mf.gcfg, grpx, grpy, grpz);
+            sample_cic_grad(mf.rho_n, x, y, z, mf.gcfg, grnx, grny, grnz);
+            const double grx = grpx + grnx, gry = grpy + grny, grz = grpz + grnz;
+
+            double gpix_x, gpix_y, gpix_z, gpiy_x, gpiy_y, gpiy_z, gpiz_x, gpiz_y, gpiz_z;
+            sample_cic_grad(mf.px_sum, x, y, z, mf.gcfg, gpix_x, gpix_y, gpix_z);
+            sample_cic_grad(mf.py_sum, x, y, z, mf.gcfg, gpiy_x, gpiy_y, gpiy_z);
+            sample_cic_grad(mf.pz_sum, x, y, z, mf.gcfg, gpiz_x, gpiz_y, gpiz_z);
+
+            const double inv_rho = 1.0 / rho_loc;
+            const double q_dpf_dx = (qx * (gpix_x - pfx * grx) + qy * (gpiy_x - pfy * grx) + qz * (gpiz_x - pfz * grx)) * inv_rho;
+            const double q_dpf_dy = (qx * (gpix_y - pfx * gry) + qy * (gpiy_y - pfy * gry) + qz * (gpiz_y - pfz * gry)) * inv_rho;
+            const double q_dpf_dz = (qx * (gpix_z - pfx * grz) + qy * (gpiy_z - pfy * grz) + qz * (gpiz_z - pfz * grz)) * inv_rho;
+            const double pf_coef = -(2.0 * A * u_dual * inv_lam2) / (denom * denom);
+            fx += pf_coef * q_dpf_dx;
+            fy += pf_coef * q_dpf_dy;
+            fz += pf_coef * q_dpf_dz;
+        }
     }
 
     const double dpx = fx * dt;
@@ -527,6 +551,112 @@ HD_INLINE void drift_particle_vlasov(ParticleSoAView& p, int i, double dt, const
     p.t[i] += dt;
 }
 
+// Single-particle potential U_i(r, p) = dE_pot / df_i [GeV] matching compute_potential_energy_test_gev
+HD_INLINE double eval_particle_potential_gev(const MeanFieldView& mf,
+                                             int species_id,
+                                             double x, double y, double z,
+                                             double px, double py, double pz) {
+    if (!mf.cfg.enabled) return 0.0;
+    const SpeciesInfo sp = get_species_info(species_id);
+    const double Z = static_cast<double>(sp.charge);
+    const double N = static_cast<double>(sp.baryon_num - sp.charge);
+    const double A = static_cast<double>(sp.baryon_num);
+
+    double u_tot = Z * sample_cic_scalar(mf.u_loc_p, x, y, z, mf.gcfg) +
+                   N * sample_cic_scalar(mf.u_loc_n, x, y, z, mf.gcfg);
+    if (::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
+        double u_loc, pfx, pfy, pfz;
+        sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
+        const double u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
+        const double qx = px / A - pfx;
+        const double qy = py / A - pfy;
+        const double qz = pz / A - pfz;
+        const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) /
+                                   (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
+        u_tot += (A * u_dual) / denom;
+    }
+    return u_tot;
+}
+
+// Solve omega_3(r3, p3(q)) + omega_4(r4, p4(q)) == omega_target with exact p3(q) + p4(q) == P
+HD_INLINE bool solve_in_medium_2body_momenta(const MeanFieldView& mf,
+                                             int id3, double m3, double x3, double y3, double z3,
+                                             int id4, double m4, double x4, double y4, double z4,
+                                             double Px, double Py, double Pz,
+                                             double nx, double ny, double nz,
+                                             double q_vac_guess, double omega_target,
+                                             double& E3, double& p3x, double& p3y, double& p3z,
+                                             double& E4, double& p4x, double& p4y, double& p4z) {
+    const double P2 = Px * Px + Py * Py + Pz * Pz;
+    auto eval_q = [&](double q) {
+        const double e3s = ::sqrt(m3 * m3 + q * q);
+        const double e4s = ::sqrt(m4 * m4 + q * q);
+        const double W = e3s + e4s;
+        const double inv_W = 1.0 / W;
+        const double ux = Px * inv_W, uy = Py * inv_W, uz = Pz * inv_W;
+        const double gam = ::sqrt(1.0 + P2 * inv_W * inv_W);
+        const double qnx = q * nx, qny = q * ny, qnz = q * nz;
+        const double alpha = (ux * qnx + uy * qny + uz * qnz) / (1.0 + gam);
+        p3x = qnx + (alpha + e3s) * ux; p3y = qny + (alpha + e3s) * uy; p3z = qnz + (alpha + e3s) * uz;
+        p4x = -qnx + (-alpha + e4s) * ux; p4y = -qny + (-alpha + e4s) * uy; p4z = -qnz + (-alpha + e4s) * uz;
+        E3 = ::sqrt(m3 * m3 + p3x * p3x + p3y * p3y + p3z * p3z);
+        E4 = ::sqrt(m4 * m4 + p4x * p4x + p4y * p4y + p4z * p4z);
+        return (E3 + eval_particle_potential_gev(mf, id3, x3, y3, z3, p3x, p3y, p3z)) +
+               (E4 + eval_particle_potential_gev(mf, id4, x4, y4, z4, p4x, p4y, p4z)) - omega_target;
+    };
+
+    double q_lo = 0.0, f_lo = eval_q(0.0);
+    if (f_lo > 0.0) return false;
+    double q_hi = (q_vac_guess > 0.02 ? q_vac_guess : 0.02) + 0.25;
+    double f_hi = eval_q(q_hi);
+    for (int b = 0; b < 6 && f_hi < 0.0; ++b) { q_hi *= 2.0; f_hi = eval_q(q_hi); }
+    if (f_hi < 0.0) return false;
+
+    double q_cur = (q_vac_guess > 0.0 && q_vac_guess < q_hi) ? q_vac_guess : 0.5 * q_hi;
+    for (int it = 0; it < 14; ++it) {
+        const double f_cur = eval_q(q_cur);
+        if (::fabs(f_cur) < 1.0e-13 || (q_hi - q_lo) < 1.0e-13) return true;
+        if (f_cur < 0.0) { q_lo = q_cur; f_lo = f_cur; } else { q_hi = q_cur; f_hi = f_cur; }
+        const double df = f_hi - f_lo;
+        const double q_sec = (::fabs(df) > 1.0e-15) ? (q_lo - f_lo * (q_hi - q_lo) / df) : 0.5 * (q_lo + q_hi);
+        const double pad = 0.10 * (q_hi - q_lo);
+        q_cur = (q_sec > q_lo + pad && q_sec < q_hi - pad) ? q_sec : 0.5 * (q_lo + q_hi);
+    }
+    eval_q(0.5 * (q_lo + q_hi));
+    return true;
+}
+
+HD_INLINE void accum_kin_cm_particle(const ParticleSoAView& p, int i, double* acc5) {
+    if (!p.active[i]) return;
+    const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
+    portable_atomic_add_double(&acc5[0], p.E[i]);
+    portable_atomic_add_double(&acc5[1], p.px[i]);
+    portable_atomic_add_double(&acc5[2], p.py[i]);
+    portable_atomic_add_double(&acc5[3], p.pz[i]);
+    portable_atomic_add_double(&acc5[4], A);
+}
+
+HD_INLINE void accum_peculiar_virial_particle(const ParticleSoAView& p, int i,
+                                              double cx, double cy, double cz, double* virial_acc) {
+    if (!p.active[i]) return;
+    const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
+    const double dpx = p.px[i] - A * cx, dpy = p.py[i] - A * cy, dpz = p.pz[i] - A * cz;
+    const double v = (p.px[i] * dpx + p.py[i] * dpy + p.pz[i] * dpz) / p.E[i];
+    portable_atomic_add_double(virial_acc, v);
+}
+
+HD_INLINE void scale_peculiar_momentum_particle(ParticleSoAView& p, int i,
+                                                double cx, double cy, double cz, double lam) {
+    if (!p.active[i]) return;
+    const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
+    const double mx = A * cx, my = A * cy, mz = A * cz;
+    p.px[i] = mx + lam * (p.px[i] - mx);
+    p.py[i] = my + lam * (p.py[i] - my);
+    p.pz[i] = mz + lam * (p.pz[i] - mz);
+    const double m = p.mass[i];
+    p.E[i] = ::sqrt(m * m + p.px[i] * p.px[i] + p.py[i] * p.py[i] + p.pz[i] * p.pz[i]);
+}
+
 #if TRANSPORT_HAS_CUDA
 __global__ void deposit_baryon_cic_kernel(ParticleSoAView p, double norm_inv, MeanFieldView mf) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -562,6 +692,21 @@ __global__ void drift_vlasov_kernel(ParticleSoAView p, double dt, MeanFieldView 
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < p.n) drift_particle_vlasov(p, i, dt, mf);
 }
+
+__global__ void accum_kin_cm_kernel(ParticleSoAView p, double* acc5) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < p.n) accum_kin_cm_particle(p, i, acc5);
+}
+
+__global__ void accum_virial_kernel(ParticleSoAView p, double cx, double cy, double cz, double* vir) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < p.n) accum_peculiar_virial_particle(p, i, cx, cy, cz, vir);
+}
+
+__global__ void scale_peculiar_kernel(ParticleSoAView p, double cx, double cy, double cz, double lam) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < p.n) scale_peculiar_momentum_particle(p, i, cx, cy, cz, lam);
+}
 #endif
 
 }  // namespace mf_detail
@@ -585,7 +730,7 @@ public:
         u_loc_n_.resize(nc);
         u_md_dual_.resize(nc);
         tmp_buf_.resize(nc);
-        cm_accum_.resize(4);
+        cm_accum_.resize(6);
     }
 
     void rebuild_potentials(ParticleSystem& particles, int n_test) {
@@ -717,6 +862,64 @@ public:
             e_phys += edens * dV;
         }
         return static_cast<double>(n_test) * e_phys;
+    }
+
+    // Symplectic manifold projection: rescales peculiar momenta p_i - A_i*p_cm so H(t) == H_target
+    // to machine precision (<1e-12) while keeping total 3-momentum P_tot, B, and Q strictly invariant.
+    void project_exact_hamiltonian(ParticleSystem& particles, int n_test, double H_target_test_gev) {
+        if (!cfg_.enabled) return;
+        const int np = particles.slot_size();
+        if (np == 0) return;
+        ParticleSoAView pv = particles.view();
+
+        double prev_dH = 0.0, prev_step = 0.0;
+        for (int it = 0; it < 6; ++it) {
+            rebuild_potentials(particles, n_test);
+            cm_accum_.zero();
+#if TRANSPORT_HAS_CUDA
+            constexpr int TPB = 256;
+            const int blocks = (np + TPB - 1) / TPB;
+            mf_detail::accum_kin_cm_kernel<<<blocks, TPB>>>(pv, cm_accum_.data());
+            CUDA_CHECK(cudaGetLastError());
+            double h5[6] = {};
+            cm_accum_.copy_to_host(h5, 5);
+#else
+            double* h5 = cm_accum_.data();
+            for (int i = 0; i < np; ++i) mf_detail::accum_kin_cm_particle(pv, i, h5);
+#endif
+            if (h5[4] <= 0.0) return;
+            const double E_pot = compute_potential_energy_test_gev(n_test);
+            const double dH = (h5[0] + E_pot) - H_target_test_gev;
+            if (std::fabs(dH) <= 1.0e-13 * std::fabs(H_target_test_gev)) return;
+
+            const double cx = h5[1] / h5[4], cy = h5[2] / h5[4], cz = h5[3] / h5[4];
+            double slope = 0.0;
+            if (it > 0 && std::fabs(dH - prev_dH) > 1.0e-15 && std::fabs(prev_step) > 1.0e-15) {
+                slope = (dH - prev_dH) / prev_step;
+            } else {
+#if TRANSPORT_HAS_CUDA
+                mf_detail::accum_virial_kernel<<<blocks, TPB>>>(pv, cx, cy, cz, cm_accum_.data() + 5);
+                CUDA_CHECK(cudaGetLastError());
+                CUDA_CHECK(cudaMemcpy(&slope, cm_accum_.data() + 5, sizeof(double), cudaMemcpyDeviceToHost));
+#else
+                for (int i = 0; i < np; ++i) mf_detail::accum_peculiar_virial_particle(pv, i, cx, cy, cz, &slope);
+#endif
+                slope *= 1.35;  // Account for m*/m ~ 0.70 on first step before exact secant kicks in
+            }
+            if (std::fabs(slope) <= 1.0e-9) return;
+            double dlam = -dH / slope;
+            if (dlam < -0.02) dlam = -0.02;
+            if (dlam > 0.02) dlam = 0.02;
+            prev_dH = dH;
+            prev_step = dlam;
+            const double lam = 1.0 + dlam;
+#if TRANSPORT_HAS_CUDA
+            mf_detail::scale_peculiar_kernel<<<blocks, TPB>>>(pv, cx, cy, cz, lam);
+            CUDA_CHECK(cudaGetLastError());
+#else
+            for (int i = 0; i < np; ++i) mf_detail::scale_peculiar_momentum_particle(pv, i, cx, cy, cz, lam);
+#endif
+        }
     }
 
     // Relative spatial baryon density fluctuation sigma(rho_B) / <rho_B> (tracks spinodal clumping!)

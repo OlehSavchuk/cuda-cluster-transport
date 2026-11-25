@@ -277,6 +277,7 @@ void print_usage(const char* prog) {
         "  --reactions <all|elastic>          Enable full inelastic+BW network or elastic only\n"
         "  --eos <none|skyrme-soft|md-soft|md-stiff>\n"
         "                                     Mean-field EOS + MD potential (default: none)\n"
+        "  --in-medium-ec <off|on|exact>      MD energy conservation: per-vertex (on) or +projection (exact)\n"
         "  --inelastic-scale <float>          Scale factor on 2<->2 inelastic couplings (default: 1.0)\n"
         "  --npart <int>                      Initial test particles (default: 32000)\n"
         "  --ntest <int>                      Test-particle oversampling N_test (default: 20)\n"
@@ -371,6 +372,10 @@ int main(int argc, char** argv) {
             rxn_mode = next_str();
         } else if (arg == "--eos") {
             eos_name = next_str();
+        } else if (arg == "--in-medium-ec" || arg == "--md-ec") {
+            const std::string v = next_str();
+            step_cfg.in_medium_energy_conservation = (v == "on" || v == "1" || v == "true" || v == "exact");
+            step_cfg.exact_hamiltonian_projection = (v == "exact");
         } else if (arg == "--inelastic-scale") {
             inelastic_scale = std::stod(next_str());
         } else if (arg == "--npart") {
@@ -548,9 +553,11 @@ int main(int argc, char** argv) {
     std::printf(" Initial N_part : %d test particles (N_test = %d)\n", n_particles, n_test);
     std::printf(" Grid           : %dx%dx%d = %d cells, dV = %.3f fm^3\n",
                 gcfg.nx, gcfg.ny, gcfg.nz, gcfg.num_cells(), gcfg.cell_volume_fm3());
-    std::printf(" Time Stepping  : %d steps, dt = %.3f fm/c (%d substeps/step), scheme = %s\n",
+    std::printf(" Time Stepping  : %d steps, dt = %.3f fm/c (%d substeps/step), scheme = %s | In-Medium EC: %s\n",
                 n_steps, dt_fm, substeps,
-                (step_cfg.scheme == CollisionScheme::DisjointPairs) ? "DisjointPairs" : "AllPairs");
+                (step_cfg.scheme == CollisionScheme::DisjointPairs) ? "DisjointPairs" : "AllPairs",
+                !mf_cfg.enabled ? "OFF" : (step_cfg.exact_hamiltonian_projection ? "EXACT"
+                                          : (step_cfg.in_medium_energy_conservation ? "ON" : "OFF")));
     std::printf("=======================================================================================\n");
     std::printf("%5s %7s %7s %7s %6s %6s %5s %6s %9s %8s %8s %8s\n",
                 "Step", "t[fm/c]", "N(p,n)", "d", "d*", "t+3He", "4He", "4He*",

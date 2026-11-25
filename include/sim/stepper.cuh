@@ -33,6 +33,8 @@ struct StepperConfig {
     int n_test = 1;                 // Test-particle oversampling factor N_test
     int collision_substeps = 1;     // Sub-cycles per spatial cell build (reduces max P_pair)
     CollisionScheme scheme = CollisionScheme::DisjointPairs;
+    bool in_medium_energy_conservation = true;  // Conserve E_kin + U(r, p) in 2<->2 & 2<->1 vertices
+    bool exact_hamiltonian_projection = false;  // Manifold projection H(t) == H(0) (<1e-12)
     std::uint64_t seed = 20261124ULL;
 };
 
@@ -100,6 +102,8 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
                                 const GridConfig& gcfg,
                                 const CrossSectionConfig& xs_cfg,
                                 const ReactionConfig& rxn_cfg,
+                                const MeanFieldView& mf_view,
+                                bool conserve_med_ec,
                                 PhiloxRng& rng,
                                 unsigned long long* d_overflows,
                                 double* d_max_prob) {
@@ -225,6 +229,14 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
 
     // If prob_tot > 1 (overflow), normalize channel selection within w_tot
     const double sel = (prob_tot <= 1.0) ? (u_draw / rate_prefactor) : (rng.uniform() * w_tot);
+    const bool use_med_ec = conserve_med_ec && mf_view.cfg.enabled;
+    const double x1 = p.x[idx1], y1 = p.y[idx1], z1 = p.z[idx1];
+    const double x2 = p.x[idx2], y2 = p.y[idx2], z2 = p.z[idx2];
+    const double Px_tot = p1_in.x + p2_in.x, Py_tot = p1_in.y + p2_in.y, Pz_tot = p1_in.z + p2_in.z;
+    const double omega_in = use_med_ec
+        ? ((p1_in.t + mf_detail::eval_particle_potential_gev(mf_view, id1, x1, y1, z1, p1_in.x, p1_in.y, p1_in.z)) +
+           (p2_in.t + mf_detail::eval_particle_potential_gev(mf_view, id2, x2, y2, z2, p2_in.x, p2_in.y, p2_in.z)))
+        : (p1_in.t + p2_in.t);
 
     // Branch A: Elastic 2 -> 2
     if (sel < w_el) {
@@ -233,6 +245,21 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
 
         FourVector p1_out{}, p2_out{};
         scatter_elastic_2to2(p1_in, m1, p2_in, m2, kin, cos_theta, phi, p1_out, p2_out);
+        if (use_med_ec) {
+            const double inv_s = 1.0 / kin.sqrt_s;
+            const double ux = Px_tot * inv_s, uy = Py_tot * inv_s, uz = Pz_tot * inv_s;
+            const double gam = (p1_in.t + p2_in.t) * inv_s;
+            const double c_boost = (ux * p1_out.x + uy * p1_out.y + uz * p1_out.z) / (1.0 + gam) - p1_out.t;
+            const double qx = p1_out.x + c_boost * ux, qy = p1_out.y + c_boost * uy, qz = p1_out.z + c_boost * uz;
+            const double qn = ::sqrt(qx * qx + qy * qy + qz * qz);
+            if (qn <= 1.0e-14) return 0;
+            if (!mf_detail::solve_in_medium_2body_momenta(
+                    mf_view, id1, m1, x1, y1, z1, id2, m2, x2, y2, z2,
+                    Px_tot, Py_tot, Pz_tot, qx / qn, qy / qn, qz / qn, kin.p_cm, omega_in,
+                    p1_out.t, p1_out.x, p1_out.y, p1_out.z, p2_out.t, p2_out.x, p2_out.y, p2_out.z)) {
+                return 0;
+            }
+        }
 
         p.E[idx1] = p1_out.t; p.px[idx1] = p1_out.x; p.py[idx1] = p1_out.y; p.pz[idx1] = p1_out.z;
         p.E[idx2] = p2_out.t; p.px[idx2] = p2_out.x; p.py[idx2] = p2_out.y; p.pz[idx2] = p2_out.z;
@@ -261,20 +288,47 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
 
         double m3 = sp3.pole_mass_gev;
         double m4 = sp4.pole_mass_gev;
+        double s_avail_sqrt = kin.sqrt_s;
+        if (use_med_ec && (sp3.is_excited || sp4.is_excited)) {
+            const double A_tot = static_cast<double>(sp3.baryon_num + sp4.baryon_num);
+            const double f3 = static_cast<double>(sp3.baryon_num) / A_tot;
+            const double f4 = static_cast<double>(sp4.baryon_num) / A_tot;
+            const double u0 = mf_detail::eval_particle_potential_gev(
+                                  mf_view, out3, x1, y1, z1, f3 * Px_tot, f3 * Py_tot, f3 * Pz_tot) +
+                              mf_detail::eval_particle_potential_gev(
+                                  mf_view, out4, x2, y2, z2, f4 * Px_tot, f4 * Py_tot, f4 * Pz_tot);
+            const double e_kin_avail = omega_in - u0;
+            const double s_eff = e_kin_avail * e_kin_avail - (Px_tot * Px_tot + Py_tot * Py_tot + Pz_tot * Pz_tot);
+            if (e_kin_avail <= 0.0 || s_eff <= 0.0) return 0;
+            s_avail_sqrt = ::sqrt(s_eff);
+        }
         if (sp3.is_excited && !sp4.is_excited) {
-            m3 = sample_breit_wigner_2to2_mass(out3, kin.sqrt_s, m4, rng);
+            if (s_avail_sqrt <= resonance_min_mass(out3) + m4 + 1.0e-5) return 0;
+            m3 = sample_breit_wigner_2to2_mass(out3, s_avail_sqrt, m4, rng);
         } else if (!sp3.is_excited && sp4.is_excited) {
-            m4 = sample_breit_wigner_2to2_mass(out4, kin.sqrt_s, m3, rng);
+            if (s_avail_sqrt <= m3 + resonance_min_mass(out4) + 1.0e-5) return 0;
+            m4 = sample_breit_wigner_2to2_mass(out4, s_avail_sqrt, m3, rng);
         }
 
-        const double p_cm_out = two_body_p_cm(kin.sqrt_s, m3, m4);
-        if (p_cm_out <= 0.0) return 0;
+        const double p_cm_out = two_body_p_cm(s_avail_sqrt, m3, m4);
+        if (!use_med_ec && p_cm_out <= 0.0) return 0;
 
         const double cos_theta = 1.0 - 2.0 * rng.uniform();
         const double phi = phys::TWO_PI * rng.uniform();
         FourVector p3_out{}, p4_out{};
-        scatter_general_2to2(p1_in, p2_in, kin.sqrt_s, m3, m4, p_cm_out,
-                             cos_theta, phi, p3_out, p4_out);
+        if (use_med_ec) {
+            const double sth = ::sqrt((1.0 - cos_theta * cos_theta > 0.0) ? (1.0 - cos_theta * cos_theta) : 0.0);
+            const double nx = sth * ::cos(phi), ny = sth * ::sin(phi), nz = cos_theta;
+            if (!mf_detail::solve_in_medium_2body_momenta(
+                    mf_view, out3, m3, x1, y1, z1, out4, m4, x2, y2, z2,
+                    Px_tot, Py_tot, Pz_tot, nx, ny, nz, p_cm_out, omega_in,
+                    p3_out.t, p3_out.x, p3_out.y, p3_out.z, p4_out.t, p4_out.x, p4_out.y, p4_out.z)) {
+                return 0;
+            }
+        } else {
+            scatter_general_2to2(p1_in, p2_in, kin.sqrt_s, m3, m4, p_cm_out,
+                                 cos_theta, phi, p3_out, p4_out);
+        }
 
         p.species[idx1] = out3;
         p.mass[idx1] = m3;
@@ -302,29 +356,30 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
         }
         const int res_id = form_res[chosen];
 
-        const double E_R = p1_in.t + p2_in.t;
-        const double Px_R = p1_in.x + p2_in.x;
-        const double Py_R = p1_in.y + p2_in.y;
-        const double Pz_R = p1_in.z + p2_in.z;
-        const double m_R_sq = E_R * E_R - (Px_R * Px_R + Py_R * Py_R + Pz_R * Pz_R);
-        if (m_R_sq <= 0.0) return 0;
-        const double m_R = ::sqrt(m_R_sq);
-
-        double rx = (p1_in.t * p.x[idx1] + p2_in.t * p.x[idx2]) / E_R;
-        double ry = (p1_in.t * p.y[idx1] + p2_in.t * p.y[idx2]) / E_R;
-        double rz = (p1_in.t * p.z[idx1] + p2_in.t * p.z[idx2]) / E_R;
+        const double E_kin_sum = p1_in.t + p2_in.t;
+        double rx = (p1_in.t * x1 + p2_in.t * x2) / E_kin_sum;
+        double ry = (p1_in.t * y1 + p2_in.t * y2) / E_kin_sum;
+        double rz = (p1_in.t * z1 + p2_in.t * z2) / E_kin_sum;
         if (gcfg.boundary == BoundaryMode::PeriodicBox) {
             rx = wrap_periodic(rx, gcfg.xmin, gcfg.lx());
             ry = wrap_periodic(ry, gcfg.ymin, gcfg.ly());
             rz = wrap_periodic(rz, gcfg.zmin, gcfg.lz());
         }
 
+        const double E_R = use_med_ec
+            ? (omega_in - mf_detail::eval_particle_potential_gev(mf_view, res_id, rx, ry, rz, Px_tot, Py_tot, Pz_tot))
+            : E_kin_sum;
+        const double m_R_sq = E_R * E_R - (Px_tot * Px_tot + Py_tot * Py_tot + Pz_tot * Pz_tot);
+        const double m_th = resonance_min_mass(res_id);
+        if (E_R <= 0.0 || m_R_sq <= (m_th + 1.0e-5) * (m_th + 1.0e-5)) return 0;
+        const double m_R = ::sqrt(m_R_sq);
+
         p.species[idx1] = res_id;
         p.mass[idx1] = m_R;
         p.E[idx1] = E_R;
-        p.px[idx1] = Px_R;
-        p.py[idx1] = Py_R;
-        p.pz[idx1] = Pz_R;
+        p.px[idx1] = Px_tot;
+        p.py[idx1] = Py_tot;
+        p.pz[idx1] = Pz_tot;
         p.x[idx1] = rx;
         p.y[idx1] = ry;
         p.z[idx1] = rz;
@@ -344,6 +399,8 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
 HD_INLINE bool try_resonance_decay(ParticleSoAView& p,
                                    int i,
                                    double dt,
+                                   const MeanFieldView& mf_view,
+                                   bool conserve_med_ec,
                                    PhiloxRng& rng) {
     if (!p.active[i]) return false;
     const int res_id = p.species[i];
@@ -386,21 +443,32 @@ HD_INLINE bool try_resonance_decay(ParticleSoAView& p,
     const double mb = get_species_info(d2_id).pole_mass_gev;
     if (m_R <= ma + mb + 1.0e-12) return false;
 
-    // Reserve output slot atomically before mutating parent slot
-    const int slot_b = portable_atomic_add_int(p.d_n_slots, 1);
-    if (slot_b >= p.capacity) {
-        // Roll back if capacity exhausted (prevented in practice by ensure_headroom)
-        portable_atomic_add_int(p.d_n_slots, -1);
-        return false;
-    }
-
+    const double rx = p.x[i], ry = p.y[i], rz = p.z[i], rt = p.t[i];
     const FourVector p_res{E_R, p.px[i], p.py[i], p.pz[i]};
     const double cos_theta = 1.0 - 2.0 * rng.uniform();
     const double phi = phys::TWO_PI * rng.uniform();
     FourVector pa_out{}, pb_out{};
-    decay_isotropic_1to2(p_res, m_R, ma, mb, cos_theta, phi, pa_out, pb_out);
+    if (conserve_med_ec && mf_view.cfg.enabled) {
+        const double omega_in = E_R + mf_detail::eval_particle_potential_gev(
+                                          mf_view, res_id, rx, ry, rz, p_res.x, p_res.y, p_res.z);
+        const double sth = ::sqrt((1.0 - cos_theta * cos_theta > 0.0) ? (1.0 - cos_theta * cos_theta) : 0.0);
+        const double q_vac = two_body_p_cm(m_R, ma, mb);
+        if (!mf_detail::solve_in_medium_2body_momenta(
+                mf_view, d1_id, ma, rx, ry, rz, d2_id, mb, rx, ry, rz,
+                p_res.x, p_res.y, p_res.z, sth * ::cos(phi), sth * ::sin(phi), cos_theta, q_vac, omega_in,
+                pa_out.t, pa_out.x, pa_out.y, pa_out.z, pb_out.t, pb_out.x, pb_out.y, pb_out.z)) {
+            return false;
+        }
+    } else {
+        decay_isotropic_1to2(p_res, m_R, ma, mb, cos_theta, phi, pa_out, pb_out);
+    }
 
-    const double rx = p.x[i], ry = p.y[i], rz = p.z[i], rt = p.t[i];
+    // Reserve output slot atomically before mutating parent slot
+    const int slot_b = portable_atomic_add_int(p.d_n_slots, 1);
+    if (slot_b >= p.capacity) {
+        portable_atomic_add_int(p.d_n_slots, -1);
+        return false;
+    }
 
     // Overwrite slot i with daughter a
     p.species[i] = d1_id;
@@ -440,13 +508,15 @@ __global__ void drift_particles_kernel(ParticleSoAView p, double dt, GridConfig 
 __global__ void decay_resonances_kernel(ParticleSoAView p,
                                         int n_initial_slots,
                                         double dt,
+                                        MeanFieldView mf_view,
+                                        bool conserve_med_ec,
                                         std::uint64_t seed,
                                         std::uint64_t decay_step_id,
                                         unsigned long long* d_decays) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_initial_slots) return;
     PhiloxRng rng(seed, decay_step_id, static_cast<std::uint64_t>(i) + 0x9E3779B9ULL);
-    if (try_resonance_decay(p, i, dt, rng)) {
+    if (try_resonance_decay(p, i, dt, mf_view, conserve_med_ec, rng)) {
         atomicAdd(d_decays, 1ULL);
     }
 }
@@ -455,6 +525,8 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
                                               GridView g,
                                               CrossSectionConfig xs_cfg,
                                               ReactionConfig rxn_cfg,
+                                              MeanFieldView mf_view,
+                                              bool conserve_med_ec,
                                               double sub_dt,
                                               int n_test,
                                               std::uint64_t seed,
@@ -498,7 +570,7 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
 
         ++l_tested;
         const int outcome = try_pair_reaction(
-            p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg,
+            p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg, mf_view, conserve_med_ec,
             rng, &d_stats[4], d_max_prob);
         if (outcome == 1) ++l_el;
         else if (outcome == 2) ++l_inel;
@@ -515,6 +587,8 @@ __global__ void collide_all_pairs_kernel(ParticleSoAView p,
                                          GridView g,
                                          CrossSectionConfig xs_cfg,
                                          ReactionConfig rxn_cfg,
+                                         MeanFieldView mf_view,
+                                         bool conserve_med_ec,
                                          double sub_dt,
                                          int n_test,
                                          std::uint64_t seed,
@@ -550,7 +624,7 @@ __global__ void collide_all_pairs_kernel(ParticleSoAView p,
 
             ++l_tested;
             const int outcome = try_pair_reaction(
-                p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg,
+                p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg, mf_view, conserve_med_ec,
                 rng, &d_stats[4], d_max_prob);
             if (outcome > 0) {
                 if (outcome == 1) ++l_el;
@@ -596,19 +670,30 @@ public:
 
         if (use_mf) {
             mf->rebuild_potentials(particles, step_cfg_.n_test);
+            if (step_cfg_.exact_hamiltonian_projection && !has_h_target_) {
+                double e0 = 0.0;
+                const auto snap0 = particles.download();
+                for (const auto& hp : snap0) e0 += hp.E;
+                h_target_gev_ = e0 + mf->compute_potential_energy_test_gev(step_cfg_.n_test);
+                has_h_target_ = true;
+            }
             mf->kick(particles, half_dt);
             mf->drift(particles, half_dt);
+            if (step_cfg_.in_medium_energy_conservation) {
+                mf->rebuild_potentials(particles, step_cfg_.n_test);
+            }
         } else {
             drift(particles, grid.config(), half_dt);
         }
 
+        const MeanFieldView mf_view = use_mf ? mf->view() : MeanFieldView{};
         if (rxn_cfg_.enable_resonance_2to1_and_decays) {
-            decay_resonances(particles, half_dt, step_index_ * 2ULL);
+            decay_resonances(particles, half_dt, step_index_ * 2ULL, mf_view);
         }
         grid.build(particles);
-        collide(particles, grid);
+        collide(particles, grid, mf_view);
         if (rxn_cfg_.enable_resonance_2to1_and_decays) {
-            decay_resonances(particles, half_dt, step_index_ * 2ULL + 1ULL);
+            decay_resonances(particles, half_dt, step_index_ * 2ULL + 1ULL, mf_view);
         }
 
         if (use_mf) {
@@ -616,6 +701,9 @@ public:
             mf->drift(particles, half_dt);
             mf->rebuild_potentials(particles, step_cfg_.n_test);
             mf->kick(particles, half_dt);
+            if (step_cfg_.exact_hamiltonian_projection && has_h_target_) {
+                mf->project_exact_hamiltonian(particles, step_cfg_.n_test, h_target_gev_);
+            }
         } else {
             drift(particles, grid.config(), half_dt);
         }
@@ -640,7 +728,8 @@ public:
 #endif
     }
 
-    void decay_resonances(ParticleSystem& particles, double dt, std::uint64_t decay_id) {
+    void decay_resonances(ParticleSystem& particles, double dt, std::uint64_t decay_id,
+                          const MeanFieldView& mf_view = MeanFieldView{}) {
         const int n_est = particles.slot_size();
         if (n_est == 0) return;
         particles.ensure_headroom(n_est + 256);
@@ -649,30 +738,33 @@ public:
 
         ParticleSoAView pview = particles.view();
         unsigned long long* d_decays = d_ull_stats_.data() + 5;
+        const bool med_ec = step_cfg_.in_medium_energy_conservation;
 
 #if TRANSPORT_HAS_CUDA
         constexpr int TPB = 256;
         const int blocks = (n_cur + TPB - 1) / TPB;
         detail::decay_resonances_kernel<<<blocks, TPB>>>(
-            pview, n_cur, dt, step_cfg_.seed ^ 0xA5A5A5A5ULL, decay_id, d_decays);
+            pview, n_cur, dt, mf_view, med_ec, step_cfg_.seed ^ 0xA5A5A5A5ULL, decay_id, d_decays);
         CUDA_CHECK(cudaGetLastError());
 #else
         for (int i = 0; i < n_cur; ++i) {
             PhiloxRng rng(step_cfg_.seed ^ 0xA5A5A5A5ULL, decay_id,
                           static_cast<std::uint64_t>(i) + 0x9E3779B9ULL);
-            if (detail::try_resonance_decay(pview, i, dt, rng)) {
+            if (detail::try_resonance_decay(pview, i, dt, mf_view, med_ec, rng)) {
                 *d_decays += 1ULL;
             }
         }
 #endif
     }
 
-    void collide(ParticleSystem& particles, SpatialGrid& grid) {
+    void collide(ParticleSystem& particles, SpatialGrid& grid,
+                 const MeanFieldView& mf_view = MeanFieldView{}) {
         const int n_cells = grid.config().num_cells();
         if (particles.slot_size() < 2 || n_cells == 0) return;
 
         const int n_sub = (step_cfg_.collision_substeps > 0) ? step_cfg_.collision_substeps : 1;
         const double sub_dt = step_cfg_.dt_fm / static_cast<double>(n_sub);
+        const bool med_ec = step_cfg_.in_medium_energy_conservation;
 
         ParticleSoAView pview = particles.view();
         GridView gview = grid.view();
@@ -688,14 +780,14 @@ public:
             if (step_cfg_.scheme == CollisionScheme::DisjointPairs) {
                 constexpr int BLOCK_THREADS = 64;
                 detail::collide_disjoint_pairs_kernel<<<n_cells, BLOCK_THREADS>>>(
-                    pview, gview, xs_cfg_, rxn_cfg_, sub_dt, step_cfg_.n_test,
+                    pview, gview, xs_cfg_, rxn_cfg_, mf_view, med_ec, sub_dt, step_cfg_.n_test,
                     step_cfg_.seed, sub_counter, d_stats, d_maxp);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 constexpr int TPB = 128;
                 const int blocks = (n_cells + TPB - 1) / TPB;
                 detail::collide_all_pairs_kernel<<<blocks, TPB>>>(
-                    pview, gview, xs_cfg_, rxn_cfg_, sub_dt, step_cfg_.n_test,
+                    pview, gview, xs_cfg_, rxn_cfg_, mf_view, med_ec, sub_dt, step_cfg_.n_test,
                     step_cfg_.seed, sub_counter, d_stats, d_maxp);
                 CUDA_CHECK(cudaGetLastError());
             }
@@ -730,7 +822,7 @@ public:
 
                         d_stats[0] += 1ULL;
                         const int outcome = detail::try_pair_reaction(
-                            pview, idx1, idx2, prefactor, gview.cfg, xs_cfg_, rxn_cfg_,
+                            pview, idx1, idx2, prefactor, gview.cfg, xs_cfg_, rxn_cfg_, mf_view, med_ec,
                             rng, &d_stats[4], d_maxp);
                         if (outcome == 1) d_stats[1] += 1ULL;
                         else if (outcome == 2) d_stats[2] += 1ULL;
@@ -754,7 +846,7 @@ public:
                             if (!pview.active[idx2] || pview.collided[idx2]) continue;
                             d_stats[0] += 1ULL;
                             const int outcome = detail::try_pair_reaction(
-                                pview, idx1, idx2, prefactor, gview.cfg, xs_cfg_, rxn_cfg_,
+                                pview, idx1, idx2, prefactor, gview.cfg, xs_cfg_, rxn_cfg_, mf_view, med_ec,
                                 rng, &d_stats[4], d_maxp);
                             if (outcome > 0) {
                                 if (outcome == 1) d_stats[1] += 1ULL;
@@ -796,6 +888,8 @@ private:
     CrossSectionConfig xs_cfg_;
     ReactionConfig rxn_cfg_;
     std::uint64_t step_index_ = 0;
+    bool has_h_target_ = false;
+    double h_target_gev_ = 0.0;
     DeviceBuffer<unsigned long long> d_ull_stats_;
     DeviceBuffer<double> d_max_prob_;
 };

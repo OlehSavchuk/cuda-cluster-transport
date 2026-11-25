@@ -1,6 +1,6 @@
 # CUDA Relativistic Nucleon & Light-Cluster Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-12%2F12%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-13%2F13%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -194,9 +194,9 @@ ctest --test-dir build --output-on-failure -V
 # Dynamic nucleosynthesis of d, d*, t, 3He, 4He, and 4He* from pure p + n
 ./build/cluster_transport --mode nucleosynthesis --npart 30000 --ntest 15 --steps 80 --dt 0.15
 
-# FOPI Au + Au @ 250 A MeV (b = 5.5 fm) with binary 3D hydro dumps every 1.5 fm/c & flow CSV
+# FOPI Au + Au @ 250 A MeV (b = 5.5 fm) with exact Hamiltonian conservation (--in-medium-ec <off|on|exact>)
 ./build/cluster_transport --mode hic --A-nuc 197 --Z-nuc 79 --elab-amev 250.0 --impact-b 5.5 \
-  --eos md-soft --ntest 120 --box 48.0 --grid 24 --steps 240 --dt 0.30 \
+  --eos md-soft --in-medium-ec exact --ntest 120 --box 48.0 --grid 24 --steps 240 --dt 0.30 \
   --dump-hydro-dir output/auau250_hydro --dump-hydro-every 5 --flow-csv output/fopi_auau250_flow.csv
 
 # Spinodal clumping + cluster nucleation with MD-Soft Skyrme + Momentum-Dependent potential
@@ -231,8 +231,9 @@ python3 scripts/generate_animations.py
 8. **`test_dynamic_cluster_nucleosynthesis`**: Verifies spontaneous nucleation of $d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and ${}^4\text{He}^*$ from pure $p+n$ with $|\Delta E|/E \sim 10^{-15}$.
 9. **`test_reactive_expanding_fireball`**: Radial Hubble expansion with coupled elastic, inelastic, and resonance decay dynamics.
 10. **`test_eos_saturation_and_md`**: Verifies exact cold-matter saturation ($E/A(\rho_0) = -16.00\;\text{MeV}$, $P(\rho_0)=0$, $K_0 = 200/215/380\;\text{MeV}$), optical-potential zero crossing ($U(0)=-72.2\;\text{MeV} \to U(1\;\text{GeV}/c)=+10.7\;\text{MeV}$), and Landau effective mass $m^*(p_F)/m = 0.692$.
-11. **`test_vlasov_and_spinodal`**: Verifies symplectic Velocity-Verlet Hamiltonian conservation ($|\Delta H|/H < 10^{-3}$), exact CIC lattice momentum conservation ($|\Delta\vec{P}| \sim 10^{-13}\;\text{GeV}/c$), and spinodal density-contrast amplification.
+11. **`test_vlasov_and_spinodal`**: Verifies symplectic Velocity-Verlet Hamiltonian conservation ($|\Delta H|/H \approx 1.0 \times 10^{-5}$ with $\nabla_{\vec{r}}\vec{p}_f$ product-rule force), exact CIC lattice momentum conservation ($|\Delta\vec{P}| \sim 10^{-13}\;\text{GeV}/c$), and spinodal density-contrast amplification.
 12. **`test_hic_and_hydro_binary_output`**: Verifies Woods–Saxon + Thomas–Fermi $\text{Au}+\text{Au}$ CM initialization ($|\vec{P}_{\text{tot}}| < 10^{-11}\;\text{GeV}/c$) and binary `CHYD` 3D density grid conservation ($\int \rho_{B,\text{lab}}\,dV = 2 A_{\text{nuc}}$).
+13. **`test_in_medium_collision_energy_conservation`**: Verifies `--in-medium-ec <off|on|exact>` across coupled $2\leftrightarrow 2$ and $2\leftrightarrow 1$ reactions under `MDStiff`, reducing $|\Delta H|/H$ from $2.02 \times 10^{-3}$ (`off`) $\to 3.01 \times 10^{-6}$ (`on`, per-vertex quasi-energy root solver) $\to 1.05 \times 10^{-14}$ (`exact`, + Hamiltonian manifold projection).
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA

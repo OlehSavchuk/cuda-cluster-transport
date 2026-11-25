@@ -711,6 +711,63 @@ void test_hic_and_hydro_binary_output() {
                 b_int, 2 * A_nuc, max_nb_lrf, max_eps_lrf);
 }
 
+void test_in_medium_collision_energy_conservation() {
+    GridConfig gcfg{};
+    gcfg.boundary = BoundaryMode::PeriodicBox;
+    gcfg.nx = 10; gcfg.ny = 10; gcfg.nz = 10;
+    gcfg.xmin = 0.0; gcfg.xmax = 20.0;
+    gcfg.ymin = 0.0; gcfg.ymax = 20.0;
+    gcfg.zmin = 0.0; gcfg.zmax = 20.0;
+
+    MixtureConfig mix{};
+    mix.cluster_yield_boost = 2.0;
+    mix.excited_yield_boost = 2.0;
+    // Momentum-anisotropic nuclear + cluster matter at ~1.2 * rho_0 under stiff MD potential
+    auto init_p = init_box_ensemble(20000, gcfg, /*T_perp=*/0.035, /*T_z=*/0.135,
+                                    0.860, 0.0, mix, 7777ULL);
+
+    auto run_aniso_md = [&](bool med_ec, bool exact_proj, double& out_rel_dH, double& out_dP) {
+        ParticleSystem ps;
+        ps.upload(init_p);
+        SpatialGrid sg(gcfg);
+        MeanFieldGrid mf(make_mean_field_config(EOSPreset::MDStiff), gcfg);
+        StepperConfig sc{};
+        sc.dt_fm = 0.20;
+        sc.n_test = 16;  // Physical baryon density ~ 1.15 * rho_0!
+        sc.collision_substeps = 2;
+        sc.in_medium_energy_conservation = med_ec;
+        sc.exact_hamiltonian_projection = exact_proj;
+        TransportStepper stp(sc, CrossSectionConfig{}, ReactionConfig{});
+        ObservableCalculator oc;
+
+        mf.rebuild_potentials(ps, sc.n_test);
+        const GlobalObservables o0 = oc.compute(ps);
+        const double H0 = o0.E_tot + mf.compute_potential_energy_test_gev(sc.n_test);
+        for (int s = 0; s < 45; ++s) stp.step(ps, sg, &mf);
+        mf.rebuild_potentials(ps, sc.n_test);
+        const GlobalObservables o1 = oc.compute(ps);
+        const double H1 = o1.E_tot + mf.compute_potential_energy_test_gev(sc.n_test);
+
+        TEST_ASSERT(o1.baryon_tot == o0.baryon_tot && o1.charge_tot == o0.charge_tot,
+                    "Baryon/charge conservation violated in in-medium EC test");
+        out_rel_dH = std::fabs(H1 - H0) / std::fabs(H0);
+        out_dP = std::sqrt((o1.Px_tot - o0.Px_tot) * (o1.Px_tot - o0.Px_tot) +
+                           (o1.Py_tot - o0.Py_tot) * (o1.Py_tot - o0.Py_tot) +
+                           (o1.Pz_tot - o0.Pz_tot) * (o1.Pz_tot - o0.Pz_tot));
+    };
+
+    double dH_off = 0.0, dP_off = 0.0, dH_on = 0.0, dP_on = 0.0, dH_ex = 0.0, dP_ex = 0.0;
+    run_aniso_md(false, false, dH_off, dP_off);
+    run_aniso_md(true, false, dH_on, dP_on);
+    run_aniso_md(true, true, dH_ex, dP_ex);
+    TEST_ASSERT(dP_on < 1.0e-10 && dP_ex < 1.0e-10, "3-momentum drift in in-medium EC mode");
+    TEST_ASSERT(dH_on < 0.35 * dH_off && dH_on < 1.0e-3,
+                "In-medium energy conservation failed to suppress MD collision energy drift");
+    TEST_ASSERT(dH_ex < 1.0e-11, "Exact Hamiltonian projection failed to lock |dH|/H < 1e-11");
+    std::printf("[PASS] test_in_medium_collision_energy_conservation (|dH|/H: OFF=%.2e -> ON=%.2e -> EXACT=%.2e, |dP|=%.2e)\n",
+                dH_off, dH_on, dH_ex, dP_ex);
+}
+
 }  // namespace
 
 int main() {
@@ -729,6 +786,7 @@ int main() {
     test_eos_saturation_and_momentum_dependence();
     test_vlasov_meanfield_conservation_and_spinodal();
     test_hic_and_hydro_binary_output();
+    test_in_medium_collision_energy_conservation();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;
