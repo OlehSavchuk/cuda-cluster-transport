@@ -174,23 +174,16 @@ inline void compute_pratt_torrieri_lambda(const double Pstar[6], double Lambda[9
                                 alpha_out[2] * R[i][2] * R[j][2];
 }
 
-// Potential energy per baryon V_pot(n_B, delta) / n_B [GeV] and interaction pressure P_pot [GeV/fm^3]
-inline void eval_skyrme_md_pot_and_press(double nb_baryon, double delta, const MeanFieldConfig& mf_cfg,
-                                         double& v_pot_density_gev_fm3, double& p_pot_gev_fm3) {
-    v_pot_density_gev_fm3 = 0.0;
-    p_pot_gev_fm3 = 0.0;
-    if (!mf_cfg.enabled || nb_baryon <= 1.0e-10) return;
-    const double u = nb_baryon / mf_cfg.rho0_fm3;
-    v_pot_density_gev_fm3 =
-        0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
-        (mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
-        mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
-        0.5 * mf_cfg.C_md_gev * mf_cfg.rho0_fm3 * u * u * 0.80;
-    p_pot_gev_fm3 =
-        0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
-        (mf_cfg.sigma_exp * mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
-        mf_cfg.gamma_sym * mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
-        0.5 * mf_cfg.C_md_gev * mf_cfg.rho0_fm3 * u * u * 0.80;
+// Exact Skyrme + Lorentzian Momentum-Dependent potential energy density V_pot(r) [GeV/fm^3]
+// entering T^00 (matching MeanFieldGrid::compute_potential_energy_test_gev identically!)
+inline double eval_skyrme_md_t00_pot_density(double rho_b_lab, double delta, double psi_md_val,
+                                             const MeanFieldConfig& mf_cfg) {
+    if (!mf_cfg.enabled || rho_b_lab <= 1.0e-12) return 0.0;
+    const double u = rho_b_lab / mf_cfg.rho0_fm3;
+    return 0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
+           (mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
+           mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
+           0.5 * mf_cfg.C_md_gev * rho_b_lab * psi_md_val;
 }
 
 }  // namespace hcgf_detail
@@ -257,26 +250,67 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
         hydro_detail::smooth_host_field_3d(*vec, tmp, gcfg);
     }
 
+    // Second CIC pass for exact Lorentzian momentum-dependent potential psi_md(c) when C_md != 0
+    std::vector<double> psi_md(nc, 0.0);
+    if (mf_cfg.enabled && std::fabs(mf_cfg.C_md_gev) > 1.0e-12) {
+        const double inv_n_dV_rho0 = inv_n_dV / mf_cfg.rho0_fm3;
+        const double inv_lam2 = 1.0 / (mf_cfg.Lambda_md_gev * mf_cfg.Lambda_md_gev);
+        for (const auto& hp : host_p) {
+            if (exclude_frozen && hp.freezeout_tag != 0) continue;
+            const SpeciesInfo sp = get_species_info(hp.species);
+            if (sp.baryon_num <= 0) continue;
+            int i0, j0, k0;
+            double fx, fy, fz;
+            if (!mf_detail::cic_weights(hp.x, hp.y, hp.z, gcfg, i0, j0, k0, fx, fy, fz)) continue;
+
+            double r_tot = 0.0, pfx = 0.0, pfy = 0.0, pfz = 0.0;
+            for (int dz = 0; dz <= 1; ++dz) {
+                const int iz = mf_detail::wrap_or_clamp_idx(k0 + dz, gcfg.nz, gcfg.boundary);
+                const double wz = (dz == 0) ? (1.0 - fz) : fz;
+                for (int dy = 0; dy <= 1; ++dy) {
+                    const int iy = mf_detail::wrap_or_clamp_idx(j0 + dy, gcfg.ny, gcfg.boundary);
+                    const double wy = (dy == 0) ? (1.0 - fy) : fy;
+                    for (int dx = 0; dx <= 1; ++dx) {
+                        const int ix = mf_detail::wrap_or_clamp_idx(i0 + dx, gcfg.nx, gcfg.boundary);
+                        const double w = ((dx == 0) ? (1.0 - fx) : fx) * wy * wz;
+                        const int c = mf_detail::cell_flat(ix, iy, iz, gcfg);
+                        r_tot += w * (rp[c] + rn[c]);
+                        pfx += w * t0x[c]; pfy += w * t0y[c]; pfz += w * t0z[c];
+                    }
+                }
+            }
+            if (r_tot > 1.0e-10) { pfx /= r_tot; pfy /= r_tot; pfz /= r_tot; }
+            const double inv_A = 1.0 / static_cast<double>(sp.baryon_num);
+            const double qx = hp.px * inv_A - pfx, qy = hp.py * inv_A - pfy, qz = hp.pz * inv_A - pfz;
+            const double contrib = (sp.baryon_num * inv_n_dV_rho0) / (1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2);
+            for (int dz = 0; dz <= 1; ++dz) {
+                const int iz = mf_detail::wrap_or_clamp_idx(k0 + dz, gcfg.nz, gcfg.boundary);
+                const double wz = (dz == 0) ? (1.0 - fz) : fz;
+                for (int dy = 0; dy <= 1; ++dy) {
+                    const int iy = mf_detail::wrap_or_clamp_idx(j0 + dy, gcfg.ny, gcfg.boundary);
+                    const double wy = (dy == 0) ? (1.0 - fy) : fy;
+                    for (int dx = 0; dx <= 1; ++dx) {
+                        const int ix = mf_detail::wrap_or_clamp_idx(i0 + dx, gcfg.nx, gcfg.boundary);
+                        const double w = ((dx == 0) ? (1.0 - fx) : fx) * wy * wz;
+                        psi_md[mf_detail::cell_flat(ix, iy, iz, gcfg)] += w * contrib;
+                    }
+                }
+            }
+        }
+        hydro_detail::smooth_host_field_3d(psi_md, tmp, gcfg);
+    }
+
     for (int c = 0; c < nc; ++c) {
         double T00 = t00[c], T0x = t0x[c], T0y = t0y[c], T0z = t0z[c];
         double Txx = txx[c], Txy = txy[c], Txz = txz[c], Tyy = tyy[c], Tyz = tyz[c], Tzz = tzz[c];
 
-        // Add covariant Skyrme + MD interaction stress-energy tensor T_pot^munu = (V + P_pot) u_B^mu u_B^nu - P_pot g^munu
-        const double rb_lab = jb0[c];
-        const double jb2 = jbx[c] * jbx[c] + jby[c] * jby[c] + jbz[c] * jbz[c];
-        const double nb_baryon = (rb_lab * rb_lab > jb2) ? std::sqrt(rb_lab * rb_lab - jb2) : 0.0;
-        if (mf_cfg.enabled && nb_baryon > 1.0e-10 && rb_lab > 1.0e-10) {
-            const double rb_eff = std::max(rp[c] + rn[c], 1.0e-12);
+        // Include Skyrme + Momentum-Dependent potential energy density strictly in T^00
+        // (preserving exact 3-momentum conservation int T^0i d^3x == P_B^i and int T^00 d^3x == H_B!)
+        const double rb_eff = rp[c] + rn[c];
+        if (mf_cfg.enabled && rb_eff > 1.0e-12) {
             const double delta = (rn[c] - rp[c]) / rb_eff;
-            double v_pot = 0.0, p_pot = 0.0;
-            hcgf_detail::eval_skyrme_md_pot_and_press(nb_baryon, delta, mf_cfg, v_pot, p_pot);
-            const double u0 = rb_lab / nb_baryon;
-            const double ux = jbx[c] / nb_baryon, uy = jby[c] / nb_baryon, uz = jbz[c] / nb_baryon;
-            const double w_pot = v_pot + p_pot;
-            T00 = std::max(1.0e-12, T00 + w_pot * u0 * u0 - p_pot);
-            T0x += w_pot * u0 * ux; T0y += w_pot * u0 * uy; T0z += w_pot * u0 * uz;
-            Txx += w_pot * ux * ux + p_pot; Txy += w_pot * ux * uy;         Txz += w_pot * ux * uz;
-            Tyy += w_pot * uy * uy + p_pot; Tyz += w_pot * uy * uz;         Tzz += w_pot * uz * uz + p_pot;
+            const double v_pot = hcgf_detail::eval_skyrme_md_t00_pot_density(rb_eff, delta, psi_md[c], mf_cfg);
+            T00 = std::max(1.0e-12, T00 + v_pot);
         }
 
         double nb_e = 0.0, eps_e = 0.0, P_e = 0.0, vx_e = 0.0, vy_e = 0.0, vz_e = 0.0;

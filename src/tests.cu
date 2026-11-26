@@ -986,8 +986,22 @@ void test_hcgf_tmunu_and_landau_frame() {
                 "Integrated J_B^0 or baryonic J_Q^0 mismatch");
     TEST_ASSERT(std::fabs(vx_avg - bx) < 0.008 && std::fabs(vy_avg - by) < 0.008 && std::fabs(vz_avg - bz) < 0.008,
                 "Eckart 4-velocity failed to recover baryon collective boost");
-    std::printf("[PASS] test_hcgf_baryon_eckart_frame (int T00_B=%.2f/%.2f GeV [pions excluded], v_E=(%.3f,%.3f,%.3f))\n",
-                iT00, E_baryon, vx_avg, vy_avg, vz_avg);
+
+    // Verify with MDSoft potential enabled: int T^00 dV == E_kin_B + E_pot AND int T^0z dV == Pz_baryon!
+    const MeanFieldConfig mf_md = make_mean_field_config(EOSPreset::MDSoft);
+    ParticleSystem ps_md; ps_md.upload(host_p);
+    MeanFieldGrid mfg(mf_md, gcfg);
+    mfg.rebuild_potentials(ps_md, n_test);
+    const double Epot_phys = mfg.compute_potential_energy_test_gev(n_test) / n_test;
+    const HcgfGridSnapshot snap_md = compute_hcgf_tmunu_snapshot(n_test, gcfg, mf_md, host_p);
+    double iT00_md = 0.0, iT0z_md = 0.0;
+    for (int c = 0; c < nc; ++c) { iT00_md += snap_md.fields[0][c] * dV; iT0z_md += snap_md.fields[3][c] * dV; }
+    TEST_ASSERT(std::fabs(iT00_md - (E_baryon + Epot_phys)) / std::fabs(E_baryon + Epot_phys) < 1.0e-4 &&
+                std::fabs(iT0z_md - Pz_baryon) / std::fabs(Pz_baryon) < 1.0e-4,
+                "T^00 failed exact E_kin + E_pot conservation or T^0z was corrupted by potential");
+
+    std::printf("[PASS] test_hcgf_baryon_eckart_frame (int T00_B=%.2f/%.2f GeV [E_pot=%.2f in T00], v_E=(%.3f,%.3f,%.3f))\n",
+                iT00_md, E_baryon + Epot_phys, Epot_phys, vx_avg, vy_avg, vz_avg);
 }
 
 void test_pure_hadron_and_grid_freezeout_clusters() {

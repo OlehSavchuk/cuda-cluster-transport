@@ -536,19 +536,34 @@ public:
             // Match INCG EoS directly on the n_B = n_fr freeze-out hypersurface when crossing downward!
             const double nB_eff = (crossed_downward && !force_finalize) ? cfg_.n_fr_fm3 : nb_loc;
 
-            // Include attractive Skyrme+MD potential energy per baryon V_pot / n_B from interacting T_B^munu!
+            // Include exact Skyrme + Lorentzian MD potential energy strictly in lab T^00 (Ec_t00 = Ec + E_pot_cell),
+            // then extract Eckart rest-frame energy E_rest = u^0 * Ec_t00 - P_c . u_E!
             const double delta_c = static_cast<double>(Nn - Np) / static_cast<double>(Bc);
-            double v_pot_dens = 0.0, p_pot_dens = 0.0;
+            double e_pot_cell_gev = 0.0;
             if (mf_cfg.enabled) {
-                hcgf_detail::eval_skyrme_md_pot_and_press(nB_eff, delta_c, mf_cfg, v_pot_dens, p_pot_dens);
+                const double rho_b_lab = nB_eff * u0;
+                double md_avg = 0.0;
+                if (std::fabs(mf_cfg.C_md_gev) > 1.0e-12) {
+                    const double pfx = Pxc / Bc, pfy = Pyc / Bc, pfz = Pzc / Bc;
+                    const double inv_lam2 = 1.0 / (mf_cfg.Lambda_md_gev * mf_cfg.Lambda_md_gev);
+                    for (std::size_t idx : idxs) {
+                        const HostParticle& hp = host_p[idx];
+                        const double qx = hp.px - pfx, qy = hp.py - pfy, qz = hp.pz - pfz;
+                        md_avg += 1.0 / (1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2);
+                    }
+                    md_avg /= static_cast<double>(Bc);
+                }
+                const double psi_val = (rho_b_lab / mf_cfg.rho0_fm3) * md_avg;
+                const double v_pot_dens = hcgf_detail::eval_skyrme_md_t00_pot_density(rho_b_lab, delta_c, psi_val, mf_cfg);
+                e_pot_cell_gev = static_cast<double>(Bc) * (v_pot_dens / std::max(rho_b_lab, 1.0e-10));
             }
-            const double v_pot_per_b = (nB_eff > 1.0e-8) ? (v_pot_dens / nB_eff) : 0.0;
 
-            const double E_rest_eckart = u0 * Ec - (Pxc * ux + Pyc * uy + Pzc * uz);
-            const double e_kin_per_b = (E_rest_eckart - m_rest_nuc) / static_cast<double>(Bc);
-            const double e_th_gev = std::clamp(e_kin_per_b + v_pot_per_b, -0.0065, 0.120);
+            const double E_floor = std::sqrt(P2 + (0.992 * m_rest_nuc) * (0.992 * m_rest_nuc));
+            const double Ec_t00 = mf_cfg.enabled ? std::max(E_floor, Ec + e_pot_cell_gev) : Ec;
+            const double E_rest_eckart = u0 * Ec_t00 - (Pxc * ux + Pyc * uy + Pzc * uz);
+            const double e_th_gev = std::clamp((E_rest_eckart - m_rest_nuc) / static_cast<double>(Bc), -0.0065, 0.120);
             const double Mc = mf_cfg.enabled
-                                  ? std::max(m_rest_nuc - 0.0065 * Bc, Mc_kin + Bc * v_pot_per_b)
+                                  ? std::max(m_rest_nuc - 0.0065 * Bc, std::sqrt(std::max(0.0, Ec_t00 * Ec_t00 - P2)))
                                   : Mc_kin;
             const double Yp = static_cast<double>(Np) / static_cast<double>(Bc);
 

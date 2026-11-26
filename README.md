@@ -217,7 +217,7 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 Passing `--dump-tmunu-dir <dir> --dump-tmunu-every <N>` writes self-describing binary 3D grid files `tmunu_grid_XXXX.bin` (`include/sim/hcgf_io.cuh`, coarse-grained strictly over **baryons $B > 0$**, excluding pions):
 - **88-byte header (`HcgfTmunuHeader`)**: `uint32 magic = 0x46474348 ("HCGF")`, `int32 version=1, step, nx, ny, nz, n_fields=24, reserved`, `float64 t_fm, xmin, xmax, ymin, ymax, zmin, zmax`.
 - **24 contiguous `float32` 3D arrays** of shape `(nz, ny, nx)`:
-  - `[0..9]`: Symmetric baryon $T_B^{\mu\nu}$ (`T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz` in $\text{GeV}/\text{fm}^3$, kinetic + covariant Skyrme/MD interaction tensor).
+  - `[0..9]`: Symmetric baryon $T_B^{\mu\nu}$ (`T00 = T00_kin + V_pot`, exact conserved 3-momentum `T0x, T0y, T0z`, and kinetic stress `Txx..Tzz` in $\text{GeV}/\text{fm}^3$, so $\int T_B^{00} d^3x = H_B$ and $\int T_B^{0i} d^3x = P_B^i$ are both exact).
   - `[10..13]`: Baryon 4-current $J_B^\mu$ (`JB0, JBx, JBy, JBz` in $\text{fm}^{-3}$).
   - `[14..17]`: Baryonic electric charge 4-current $J_{Q,B}^\mu$ (`JQ0, JQx, JQy, JQz` in $\text{fm}^{-3}$).
   - `[18..23]`: Exact **Eckart rest-frame** fields ($u^\mu = J_B^\mu / n_B$: `eps_Eckart = u_mu T_B^munu u_nu, P_Eckart` in $\text{GeV}/\text{fm}^3$, `nB_Eckart` in $\text{fm}^{-3}$, `vx_E, vy_E, vz_E` in $c$).
