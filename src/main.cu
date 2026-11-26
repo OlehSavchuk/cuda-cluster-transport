@@ -671,8 +671,9 @@ int main(int argc, char** argv) {
     for (int step = 0; step <= n_steps; ++step) {
         const double t_now = step * dt_fm;
         const bool do_tmunu = (!dump_tmunu_dir.empty() && (step % dump_tmunu_every == 0));
+        const double fo_warmup_t = fo_cfg.min_time_fm - 1.5 * freezeout_every * dt_fm;
         const bool do_fo_check = (cluster_mode != ClusterMode::Microscopic) &&
-                                 ((step > 0 && step % freezeout_every == 0) || step == n_steps);
+                                 ((step > 0 && step % freezeout_every == 0 && t_now >= fo_warmup_t) || step == n_steps);
         if (do_fo_check || do_tmunu) {
             const HcgfGridSnapshot tmunu_snap = fo_clusterizer.process_step(
                 particles, step, t_now, n_test, mf_cfg, step_cfg.seed, /*force_finalize=*/(step == n_steps));

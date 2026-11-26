@@ -12,8 +12,12 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### 1. Microscopic Dynamical Clusters vs. Baryon-Only Eckart-Frame ($u^0 E - \vec{P}\cdot\vec{u}$) HCGF Freeze-Out ($n_B < n_{\text{fr}}$)
-Direct side-by-side comparison (`scripts/compare_microscopic_vs_hcgf_freezeout.py`) in FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ (`MD-Soft`) between **full microscopic dynamical cluster transport** (`--cluster-mode microscopic`) and **pure hadronic ($N + \Delta + \pi$) transport** with baryon-only **Eckart-frame** 24-field `HCGF` stress-energy tensor $T_B^{\mu\nu}$ export (`--dump-tmunu-dir`), cell rest-frame energy $E_{\text{rest}} = u^0 E - \vec{P}\cdot\vec{u}$ EoS inversion, and conservative Mott re-melting of back-emitted particles (`--cluster-mode freezeout --backflow remelt --nfr 0.04`):
+### 1. Microscopic Dynamical Clusters vs. Baryon-Only Eckart-Frame ($u^0 E - \vec{P}\cdot\vec{u}$) HCGF Freeze-Out ($n_B < n_{\text{fr}} = \rho_0 / 8$)
+High-statistics (`27,500` $\text{Au}+\text{Au}$ events = $10.84\;\text{M}$ test nucleons, `scripts/run_highstat_rho0_over_8.py`) side-by-side benchmark in FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ (`MD-Soft`) between **full microscopic dynamical cluster transport** (`--cluster-mode microscopic`) and **pure hadronic ($N + \Delta + \pi$) transport** with baryon-only **Eckart-frame** 24-field `HCGF` stress-energy tensor $T_B^{\mu\nu}$ export (`--dump-tmunu-dir`), cell rest-frame energy $E_{\text{rest}} = u^0 E - \vec{P}\cdot\vec{u}$ EoS inversion, and conservative Mott re-melting of back-emitted particles at $n_{\text{fr}} = \rho_0 / 8 = 0.020\;\text{fm}^{-3}$ (`--cluster-mode freezeout --backflow remelt --nfr 0.02`):
+
+<p align="center">
+  <img src="assets/fopi_eckart_rho0_over_8.png" alt="High-Statistics Eckart Freeze-Out at rho0/8 vs Microscopic BUU and FOPI" width="100%">
+</p>
 
 <p align="center">
   <img src="assets/hcgf_vs_microscopic_comparison.png" alt="Microscopic Dynamical Clusters vs HCGF Tmunu Grid Freeze-Out Clusters" width="100%">
