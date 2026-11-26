@@ -50,5 +50,8 @@ endfunction()
 configure_transport_target(cluster_transport src/main.cu)
 configure_transport_target(cluster_transport_tests src/tests.cu)
 
+configure_transport_target(cluster_transport_fp32 src/main.cu)
+target_compile_definitions(cluster_transport_fp32 PRIVATE TRANSPORT_SINGLE_PRECISION=1)
+
 enable_testing()
 add_test(NAME physics_and_kernel_suite COMMAND cluster_transport_tests)

@@ -54,9 +54,10 @@ inline std::string backend_description() {
     cudaDeviceProp prop{};
     CUDA_CHECK(cudaGetDeviceProperties(&prop, dev));
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "CUDA GPU [%s, SM %d.%d, %.1f GB VRAM]",
+    std::snprintf(buf, sizeof(buf), "CUDA GPU [%s, SM %d.%d, %.1f GB VRAM, %s]",
                   prop.name, prop.major, prop.minor,
-                  static_cast<double>(prop.totalGlobalMem) / (1024.0 * 1024.0 * 1024.0));
+                  static_cast<double>(prop.totalGlobalMem) / (1024.0 * 1024.0 * 1024.0),
+                  (sizeof(Real) == 4) ? "FP32 float" : "FP64 double");
     return std::string(buf);
 }
 
@@ -67,7 +68,9 @@ inline std::string backend_description() {
 inline void device_synchronize() {}
 
 inline std::string backend_description() {
-    return "Host C++17 Fallback (compile with nvcc / -DUSE_CUDA=ON on GPU machine)";
+    return (sizeof(Real) == 4)
+        ? "Host C++17 Fallback [FP32 float] (compile with nvcc on GPU for 12.7 TFLOPS FP32)"
+        : "Host C++17 Fallback [FP64 double] (compile with nvcc / -DUSE_CUDA=ON on GPU machine)";
 }
 
 // Host atomic helpers matching CUDA semantics for single/multi-threaded CPU execution
@@ -181,6 +184,40 @@ HD_INLINE double portable_atomic_add_double(double* addr, double val) {
     double old = *addr;
     *addr += val;
     return old;
+#endif
+}
+
+HD_INLINE float portable_atomic_add_float(float* addr, float val) {
+#if defined(__CUDA_ARCH__)
+    return atomicAdd(addr, val);
+#elif !TRANSPORT_HAS_CUDA && (defined(__clang__) || defined(__GNUC__))
+    unsigned int* addr_u = reinterpret_cast<unsigned int*>(addr);
+    unsigned int old_u = __atomic_load_n(addr_u, __ATOMIC_RELAXED);
+    unsigned int assumed;
+    do {
+        assumed = old_u;
+        float old_f;
+        std::memcpy(&old_f, &assumed, sizeof(float));
+        float new_f = old_f + val;
+        unsigned int new_u;
+        std::memcpy(&new_u, &new_f, sizeof(float));
+        old_u = __sync_val_compare_and_swap(addr_u, assumed, new_u);
+    } while (assumed != old_u);
+    float res;
+    std::memcpy(&res, &old_u, sizeof(float));
+    return res;
+#else
+    float old = *addr;
+    *addr += val;
+    return old;
+#endif
+}
+
+HD_INLINE Real portable_atomic_add_real(Real* addr, Real val) {
+#if defined(TRANSPORT_SINGLE_PRECISION)
+    return portable_atomic_add_float(addr, val);
+#else
+    return portable_atomic_add_double(addr, val);
 #endif
 }
 

@@ -29,15 +29,15 @@ struct ParticleSoAView {
     int capacity = 0;          // Allocated slot capacity
     int* d_n_slots = nullptr;  // Device-resident slot counter for atomic 1 -> 2 appends
     int* active = nullptr;     // 1 = live particle, 0 = absorbed slot
-    double* t = nullptr;
-    double* x = nullptr;
-    double* y = nullptr;
-    double* z = nullptr;
-    double* E = nullptr;
-    double* px = nullptr;
-    double* py = nullptr;
-    double* pz = nullptr;
-    double* mass = nullptr;
+    Real* t = nullptr;
+    Real* x = nullptr;
+    Real* y = nullptr;
+    Real* z = nullptr;
+    Real* E = nullptr;
+    Real* px = nullptr;
+    Real* py = nullptr;
+    Real* pz = nullptr;
+    Real* mass = nullptr;
     int* species = nullptr;
     int* cell_id = nullptr;
     int* collided = nullptr;
@@ -122,19 +122,19 @@ public:
         if (n == 0) return;
 
         std::vector<int> hact(n, 1), hsp(n), hcell(n, -1), hcol(n, 0);
-        std::vector<double> ht(n), hx(n), hy(n), hz(n);
-        std::vector<double> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
+        std::vector<Real> ht(n), hx(n), hy(n), hz(n);
+        std::vector<Real> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
 
         for (std::size_t i = 0; i < n; ++i) {
-            ht[i] = host_p[i].t;
-            hx[i] = host_p[i].x;
-            hy[i] = host_p[i].y;
-            hz[i] = host_p[i].z;
-            hE[i] = host_p[i].E;
-            hpx[i] = host_p[i].px;
-            hpy[i] = host_p[i].py;
-            hpz[i] = host_p[i].pz;
-            hmass[i] = host_p[i].mass;
+            ht[i] = static_cast<Real>(host_p[i].t);
+            hx[i] = static_cast<Real>(host_p[i].x);
+            hy[i] = static_cast<Real>(host_p[i].y);
+            hz[i] = static_cast<Real>(host_p[i].z);
+            hE[i] = static_cast<Real>(host_p[i].E);
+            hpx[i] = static_cast<Real>(host_p[i].px);
+            hpy[i] = static_cast<Real>(host_p[i].py);
+            hpz[i] = static_cast<Real>(host_p[i].pz);
+            hmass[i] = static_cast<Real>(host_p[i].mass);
             hsp[i] = host_p[i].species;
             hcol[i] = host_p[i].collided;
         }
@@ -162,8 +162,8 @@ public:
         if (n == 0) return out;
 
         std::vector<int> hact(n), hsp(n), hcol(n);
-        std::vector<double> ht(n), hx(n), hy(n), hz(n);
-        std::vector<double> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
+        std::vector<Real> ht(n), hx(n), hy(n), hz(n);
+        std::vector<Real> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
 
         active_.copy_to_host(hact.data(), n);
         t_.copy_to_host(ht.data(), n);
@@ -236,8 +236,8 @@ public:
                 ? (static_cast<std::size_t>(live) * 2 + 8192)
                 : capacity_;
         DeviceBuffer<int> n_act(new_cap), n_sp(new_cap), n_cid(new_cap), n_col(new_cap);
-        DeviceBuffer<double> n_t(new_cap), n_x(new_cap), n_y(new_cap), n_z(new_cap);
-        DeviceBuffer<double> n_E(new_cap), n_px(new_cap), n_py(new_cap), n_pz(new_cap), n_m(new_cap);
+        DeviceBuffer<Real> n_t(new_cap), n_x(new_cap), n_y(new_cap), n_z(new_cap);
+        DeviceBuffer<Real> n_E(new_cap), n_px(new_cap), n_py(new_cap), n_pz(new_cap), n_m(new_cap);
 
         ParticleSoAView dst{};
         dst.capacity = static_cast<int>(new_cap);
@@ -357,8 +357,8 @@ private:
     DeviceBuffer<int> d_n_slots_;
     DeviceBuffer<int> d_compact_count_;
     DeviceBuffer<int> active_;
-    DeviceBuffer<double> t_, x_, y_, z_;
-    DeviceBuffer<double> E_, px_, py_, pz_, mass_;
+    DeviceBuffer<Real> t_, x_, y_, z_;
+    DeviceBuffer<Real> E_, px_, py_, pz_, mass_;
     DeviceBuffer<int> species_, cell_id_, collided_;
 };
 

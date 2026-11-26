@@ -29,6 +29,13 @@ Direct benchmark against published **FOPI Collaboration experimental data** (W. 
   <img src="assets/fopi_auau250_flow.png" alt="FOPI Au + Au 250 A MeV dN/dy, v1, and v2 Flow" width="100%">
 </p>
 
+### 2. `FP64` (`double`) vs. `FP32` (`float`) Precision Benchmark (`cluster_transport` vs. `cluster_transport_fp32`)
+CMake builds both `cluster_transport` (`double`, 64-bit) and `cluster_transport_fp32` (`float`, 32-bit, `-DTRANSPORT_SINGLE_PRECISION=1`, unlocking $12.7\;\text{TFLOPS}$ FP32 pipes & hardware FP32 L2 atomics on consumer GeForce GPUs). Because `kinematics.cuh` uses the cancellation-free identity $Q^2 = |E_2\vec{p}_1 - E_1\vec{p}_2|^2 - |\vec{p}_1 \times \vec{p}_2|^2$, `FP32` avoids catastrophic near-threshold failure for boosted $A=4$ clusters and reproduces `FP64` FOPI $dN/dy_0$, $v_1(y_0)$, $v_2(u_{t0})$, and cluster yields within statistical precision:
+
+<p align="center">
+  <img src="assets/fp64_vs_fp32_comparison.png" alt="FP64 double vs FP32 float Precision Comparison" width="100%">
+</p>
+
 ### 2. Spinodal Liquid–Gas Phase Separation & Cluster Droplets (`--eos md-soft` vs `--eos none`)
 Inside the sub-saturation nuclear spinodal zone ($\rho_B \approx 0.27\,\rho_0$, $T_0 = 6\;\text{MeV}$), a free cascade stays spatially uniform whereas the **Skyrme + Lorentzian Momentum-Dependent mean field** ($K_0 = 215\;\text{MeV}$, $m^*(p_F)/m = 0.69$) spontaneously amplifies Poisson density fluctuations into self-bound liquid nuclear droplets enriched with $d, t, {}^3\text{He}, {}^4\text{He}$, and ${}^4\text{He}^*$:
 

@@ -11,6 +11,7 @@ cmake-build-*/
 *.a
 *.exe
 cluster_transport
+cluster_transport_fp32
 cluster_transport_tests
 
 # Python & Matplotlib caches
