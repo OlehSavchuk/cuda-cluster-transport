@@ -285,6 +285,8 @@ void print_usage(const char* prog) {
         "  --cluster-mode <microscopic|none|freezeout>\n"
         "                                     Cluster treatment: dynamical, pure N+Delta+pi, or n<nfr thermal\n"
         "  --backflow <remelt|outward|ghost>  Back-emitted freeze-out particle handling (default: remelt)\n"
+        "  --sampling <parcel|gc>             Freeze-out sampler: microcanonical parcel or grand-canonical\n"
+        "  --fo-oversample <int>              Grand-canonical freeze-out oversample factor M>=1 (default: 1)\n"
         "  --max-cluster-A <int>              Max nuclear mass A in freeze-out EoS/sampling (default: 6)\n"
         "  --nfr <float>                      Freeze-out Eckart baryon density n_fr [fm^-3] (default: 0.04)\n"
         "  --freezeout-every <int>            Steps between n<nfr cell checks (default: 2)\n"
@@ -354,6 +356,7 @@ int main(int argc, char** argv) {
     std::string cluster_mode_str = "freezeout";
     std::string backflow_str = "remelt";
     std::string sampling_str = "parcel";
+    int fo_oversample = 1;
     bool local_anisotropy = true;
     int pauli_override = -1;    // -1: auto (ON in hic mode, OFF in classical box modes); 0: OFF; 1: ON
     int coulomb_override = -1;  // -1: auto (ON in hic mode, OFF in box modes); 0: OFF; 1: ON
@@ -409,6 +412,8 @@ int main(int argc, char** argv) {
             backflow_str = next_str();
         } else if (arg == "--sampling" || arg == "--fo-sampling") {
             sampling_str = next_str();
+        } else if (arg == "--fo-oversample" || arg == "--oversample") {
+            fo_oversample = std::max(1, std::stoi(next_str()));
         } else if (arg == "--anisotropy" || arg == "--local-anisotropy") {
             const std::string v = next_str();
             local_anisotropy = (v == "on" || v == "1" || v == "true" || v == "pt");
@@ -627,11 +632,12 @@ int main(int argc, char** argv) {
     if (backflow_str == "outward") fo_cfg.backflow = BackflowMode::OutwardOnly;
     else if (backflow_str == "ghost") fo_cfg.backflow = BackflowMode::GhostFreeStream;
     else fo_cfg.backflow = BackflowMode::RemeltInDense;
-    if (sampling_str == "gc" || sampling_str == "grand-canonical" || sampling_str == "grand") {
+    if (sampling_str == "gc" || sampling_str == "grand-canonical" || sampling_str == "grand" || fo_oversample > 1) {
         fo_cfg.sampling = FreezeoutSampling::GrandCanonical;
     } else {
         fo_cfg.sampling = FreezeoutSampling::MicrocanonicalParcel;
     }
+    fo_cfg.oversample_factor = fo_oversample;
     fo_cfg.n_fr_fm3 = nfr_fm3;
     fo_cfg.max_cluster_A = max_cluster_A;
     fo_cfg.local_anisotropy = local_anisotropy;
@@ -808,11 +814,12 @@ int main(int argc, char** argv) {
                 obs0.n_active, obs_final.n_active);
     fo_clusterizer.write_freezeout_cells_csv();
     if (cluster_mode != ClusterMode::Microscopic) {
-        std::printf(" Freeze-Out Grid: %d cells (n_B < %.3f fm^-3) | %lld B -> %lld cl | back-inward: %lld (reabs N: %lld, remelt cl: %lld)\n",
-                    fo_clusterizer.total_cells_frozen(), fo_cfg.n_fr_fm3,
+        std::printf(" Freeze-Out Grid: %d cells (n_B < %.3f fm^-3, M_over=%d) | %lld B -> %lld cl | back-inward: %lld (reabs N: %lld, remelt cl: %lld, thinned: %lld)\n",
+                    fo_clusterizer.total_cells_frozen(), fo_cfg.n_fr_fm3, fo_cfg.oversample_factor,
                     fo_clusterizer.total_baryons_converted(), fo_clusterizer.total_clusters_formed(),
                     fo_clusterizer.back_emitted_total(),
-                    fo_clusterizer.reabsorbed_nucleons(), fo_clusterizer.remelted_clusters());
+                    fo_clusterizer.reabsorbed_nucleons(), fo_clusterizer.remelted_clusters(),
+                    fo_clusterizer.thinned_oversamples());
     }
     std::printf(" Wall Time      : %.3f s (%.2f ms/step)\n",
                 elapsed_s, 1000.0 * elapsed_s / (n_steps > 0 ? n_steps : 1));

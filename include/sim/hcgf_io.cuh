@@ -216,6 +216,8 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
         double fx, fy, fz;
         if (!mf_detail::cic_weights(hp.x, hp.y, hp.z, gcfg, i0, j0, k0, fx, fy, fz)) continue;
 
+        const double inv_fo = (hp.freezeout_tag > 1) ? (1.0 / static_cast<double>(hp.freezeout_tag)) : 1.0;
+        const double w_scale = inv_n_dV * inv_fo;
         const double B = static_cast<double>(sp.baryon_num);
         const double Q = static_cast<double>(sp.charge);
         double wp = 0.0, wn = 0.0;
@@ -231,7 +233,7 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
                 const double wy = (dy == 0) ? (1.0 - fy) : fy;
                 for (int dx = 0; dx <= 1; ++dx) {
                     const int ix = mf_detail::wrap_or_clamp_idx(i0 + dx, gcfg.nx, gcfg.boundary);
-                    const double w = (((dx == 0) ? (1.0 - fx) : fx) * wy * wz) * inv_n_dV;
+                    const double w = (((dx == 0) ? (1.0 - fx) : fx) * wy * wz) * w_scale;
                     const int c = mf_detail::cell_flat(ix, iy, iz, gcfg);
                     t00[c] += w * hp.E;
                     t0x[c] += w * hp.px;     t0y[c] += w * hp.py;     t0z[c] += w * hp.pz;
@@ -280,9 +282,11 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
                 }
             }
             if (r_tot > 1.0e-10) { pfx /= r_tot; pfy /= r_tot; pfz /= r_tot; }
+            const double inv_fo = (hp.freezeout_tag > 1) ? (1.0 / static_cast<double>(hp.freezeout_tag)) : 1.0;
             const double inv_A = 1.0 / static_cast<double>(sp.baryon_num);
             const double qx = hp.px * inv_A - pfx, qy = hp.py * inv_A - pfy, qz = hp.pz * inv_A - pfz;
-            const double contrib = (sp.baryon_num * inv_n_dV_rho0) / (1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2);
+            const double contrib = (sp.baryon_num * inv_n_dV_rho0 * inv_fo) /
+                                   (1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2);
             for (int dz = 0; dz <= 1; ++dz) {
                 const int iz = mf_detail::wrap_or_clamp_idx(k0 + dz, gcfg.nz, gcfg.boundary);
                 const double wz = (dz == 0) ? (1.0 - fz) : fz;

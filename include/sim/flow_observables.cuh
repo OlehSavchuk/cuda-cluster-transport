@@ -118,26 +118,32 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
     double mid_v2_sum[N_CAT] = {}, mid_v2_cnt[N_CAT] = {};
     double tot_yield[N_CAT] = {};
 
-    auto add_to_cat = [&](int cat, int yb, double y0, double pt, double ut0, double px, double py) {
-        tot_yield[cat] += 1.0 / n_test;
+    std::vector<double> pt_wsum(N_CAT * N_YBINS, 0.0), pt_w2(N_CAT * N_YBINS, 0.0);
+    std::vector<double> u8_wsum(N_CAT * N_YBINS, 0.0), u8_w2(N_CAT * N_YBINS, 0.0);
+    std::vector<double> u4_wsum(N_CAT * N_YBINS, 0.0), u4_w2(N_CAT * N_YBINS, 0.0);
+    std::vector<double> ut_wsum(N_CAT * N_UBINS, 0.0), ut_w2(N_CAT * N_UBINS, 0.0);
+    double mid_v2_w2[N_CAT] = {};
+
+    auto add_to_cat = [&](int cat, int yb, double y0, double pt, double ut0, double px, double py, double w_fo) {
+        tot_yield[cat] += w_fo / n_test;
         const double c1 = (pt > 1.0e-5) ? (px / pt) : 0.0;
         const double c2 = (pt > 1.0e-5) ? ((px * px - py * py) / (pt * pt)) : 0.0;
         if (yb >= 0 && yb < N_YBINS) {
             const int k = cat * N_YBINS + yb;
-            cnt[k] += 1.0;
+            cnt[k] += w_fo;
             if (pt > 1.0e-5) {
-                v1_sum[k] += c1; v1_sq[k] += c1 * c1;
-                v2_sum[k] += c2; v2_sq[k] += c2 * c2;
-                pt_cnt[k] += 1.0;
+                v1_sum[k] += w_fo * c1; v1_sq[k] += w_fo * c1 * c1;
+                v2_sum[k] += w_fo * c2; v2_sq[k] += w_fo * c2 * c2;
+                pt_wsum[k] += w_fo; pt_w2[k] += w_fo * w_fo;
                 if (ut0 > 0.8) {
-                    v1_u8_sum[k] += c1; v1_u8_sq[k] += c1 * c1;
-                    v2_u8_sum[k] += c2; v2_u8_sq[k] += c2 * c2;
-                    u8_cnt[k] += 1.0;
+                    v1_u8_sum[k] += w_fo * c1; v1_u8_sq[k] += w_fo * c1 * c1;
+                    v2_u8_sum[k] += w_fo * c2; v2_u8_sq[k] += w_fo * c2 * c2;
+                    u8_wsum[k] += w_fo; u8_w2[k] += w_fo * w_fo;
                 }
                 if (ut0 > 0.4) {
-                    v1_u4_sum[k] += c1; v1_u4_sq[k] += c1 * c1;
-                    v2_u4_sum[k] += c2; v2_u4_sq[k] += c2 * c2;
-                    u4_cnt[k] += 1.0;
+                    v1_u4_sum[k] += w_fo * c1; v1_u4_sq[k] += w_fo * c1 * c1;
+                    v2_u4_sum[k] += w_fo * c2; v2_u4_sq[k] += w_fo * c2 * c2;
+                    u4_wsum[k] += w_fo; u4_w2[k] += w_fo * w_fo;
                 }
             }
         }
@@ -145,50 +151,63 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
             const int ub = static_cast<int>(std::floor((ut0 - UT0_MIN) / dut0));
             if (ub >= 0 && ub < N_UBINS) {
                 const int ku = cat * N_UBINS + ub;
-                ut_v2_sum[ku] += c2; ut_v2_sq[ku] += c2 * c2;
-                ut_cnt[ku] += 1.0;
+                ut_v2_sum[ku] += w_fo * c2; ut_v2_sq[ku] += w_fo * c2 * c2;
+                ut_wsum[ku] += w_fo; ut_w2[ku] += w_fo * w_fo;
             }
             if (ut0 > 0.8) {
-                mid_v2_sum[cat] += c2;
-                mid_v2_cnt[cat] += 1.0;
+                mid_v2_sum[cat] += w_fo * c2;
+                mid_v2_cnt[cat] += w_fo;
+                mid_v2_w2[cat] += w_fo * w_fo;
             }
         }
     };
 
     for (const auto& hp : det) {
         if (hp.E <= std::fabs(hp.pz) + 1.0e-9) continue;
+        const double w_fo = (hp.freezeout_tag > 1) ? (1.0 / static_cast<double>(hp.freezeout_tag)) : 1.0;
         const double y = 0.5 * std::log((hp.E + hp.pz) / (hp.E - hp.pz));
         const double y0 = y / y0_norm;
         const int yb = static_cast<int>(std::floor((y0 - Y0_MIN) / dy0));
         const double pt = std::sqrt(hp.px * hp.px + hp.py * hp.py);
         const double ut0 = (hp.mass > 1.0e-6 && u_proj > 1.0e-6) ? ((pt / hp.mass) / u_proj) : 0.0;
 
-        if (hp.species == PROTON)       add_to_cat(0, yb, y0, pt, ut0, hp.px, hp.py);
-        else if (hp.species == NEUTRON) add_to_cat(1, yb, y0, pt, ut0, hp.px, hp.py);
-        else if (hp.species == DEUTERON)add_to_cat(2, yb, y0, pt, ut0, hp.px, hp.py);
+        if (hp.species == PROTON)       add_to_cat(0, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        else if (hp.species == NEUTRON) add_to_cat(1, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        else if (hp.species == DEUTERON)add_to_cat(2, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
         else if (hp.species == TRITON) {
-            add_to_cat(3, yb, y0, pt, ut0, hp.px, hp.py);
-            add_to_cat(5, yb, y0, pt, ut0, hp.px, hp.py);
+            add_to_cat(3, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+            add_to_cat(5, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
         } else if (hp.species == HELION) {
-            add_to_cat(4, yb, y0, pt, ut0, hp.px, hp.py);
-            add_to_cat(5, yb, y0, pt, ut0, hp.px, hp.py);
-        } else if (hp.species == ALPHA)      add_to_cat(6, yb, y0, pt, ut0, hp.px, hp.py);
-        else if (hp.species == PION_MINUS)   add_to_cat(7, yb, y0, pt, ut0, hp.px, hp.py);
-        else if (hp.species == PION_ZERO)    add_to_cat(8, yb, y0, pt, ut0, hp.px, hp.py);
-        else if (hp.species == PION_PLUS)    add_to_cat(9, yb, y0, pt, ut0, hp.px, hp.py);
-        else if (hp.species == HE6_GS)       add_to_cat(10, yb, y0, pt, ut0, hp.px, hp.py);
-        else if (hp.species == LI6_GS)       add_to_cat(11, yb, y0, pt, ut0, hp.px, hp.py);
+            add_to_cat(4, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+            add_to_cat(5, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        } else if (hp.species == ALPHA)      add_to_cat(6, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        else if (hp.species == PION_MINUS)   add_to_cat(7, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        else if (hp.species == PION_ZERO)    add_to_cat(8, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        else if (hp.species == PION_PLUS)    add_to_cat(9, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        else if (hp.species == HE6_GS)       add_to_cat(10, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
+        else if (hp.species == LI6_GS)       add_to_cat(11, yb, y0, pt, ut0, hp.px, hp.py, w_fo);
     }
 
     std::printf("\n=== FOPI Freeze-Out Yields & Midrapidity Squeeze-Out v2 (|y0|<0.4, u_t0>0.8) ===\n");
     for (int c = 0; c < N_CAT; ++c) {
-        const double mv2 = (mid_v2_cnt[c] > 0) ? (mid_v2_sum[c] / mid_v2_cnt[c]) : 0.0;
-        const double ev2 = (mid_v2_cnt[c] > 1) ? std::sqrt((0.5) / mid_v2_cnt[c]) : 0.0;
-        std::printf("  %-4s : Yield/ev = %7.2f | v2(|y0|<0.4, ut0>0.8) = %+7.4f +- %.4f (N = %.0f)\n",
-                    cat_names[c], tot_yield[c], mv2, ev2, mid_v2_cnt[c]);
+        const double w_mid = mid_v2_cnt[c];
+        const double n_eff_mid = (mid_v2_w2[c] > 0.0) ? ((w_mid * w_mid) / mid_v2_w2[c]) : 0.0;
+        const double mv2 = (w_mid > 0) ? (mid_v2_sum[c] / w_mid) : 0.0;
+        const double ev2 = (n_eff_mid > 1) ? std::sqrt(0.5 / n_eff_mid) : 0.0;
+        std::printf("  %-4s : Yield/ev = %7.2f | v2(|y0|<0.4, ut0>0.8) = %+7.4f +- %.4f (N_eff = %.0f)\n",
+                    cat_names[c], tot_yield[c], mv2, ev2, n_eff_mid);
     }
 
     if (!flow_csv_path.empty()) {
+        auto eval_w_stat = [](double sum_w, double sum_w2, double sum_v, double sum_v2,
+                              double& m_out, double& e_out, double& neff_out) {
+            neff_out = (sum_w2 > 0.0) ? ((sum_w * sum_w) / sum_w2) : 0.0;
+            m_out = (sum_w > 0.0) ? (sum_v / sum_w) : 0.0;
+            e_out = (neff_out > 1.0)
+                        ? std::sqrt(std::max(0.0, sum_v2 / sum_w - m_out * m_out) / neff_out)
+                        : 0.0;
+        };
+
         std::ofstream f(flow_csv_path);
         f << "species,bin,y,y0,dN_dy,dN_dy0,v1,v1_err,v2,v2_err,n_stat,"
              "v1_ut08,v1_ut08_err,v2_ut08,v2_ut08_err,n_ut08,"
@@ -200,23 +219,18 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
                 const double y_c = y0_c * y0_norm;
                 const double dn_dy = (cnt[k] / n_test) / dy_phys;
                 const double dn_dy0 = (cnt[k] / n_test) / dy0;
-                const double n_st = pt_cnt[k];
-                const double m_v1 = (n_st > 0) ? (v1_sum[k] / n_st) : 0.0;
-                const double m_v2 = (n_st > 0) ? (v2_sum[k] / n_st) : 0.0;
-                const double e_v1 = (n_st > 1) ? std::sqrt(std::max(0.0, v1_sq[k] / n_st - m_v1 * m_v1) / n_st) : 0.0;
-                const double e_v2 = (n_st > 1) ? std::sqrt(std::max(0.0, v2_sq[k] / n_st - m_v2 * m_v2) / n_st) : 0.0;
 
-                const double n_u8 = u8_cnt[k];
-                const double u8_v1 = (n_u8 > 0) ? (v1_u8_sum[k] / n_u8) : 0.0;
-                const double u8_v2 = (n_u8 > 0) ? (v2_u8_sum[k] / n_u8) : 0.0;
-                const double eu8_v1 = (n_u8 > 1) ? std::sqrt(std::max(0.0, v1_u8_sq[k] / n_u8 - u8_v1 * u8_v1) / n_u8) : 0.0;
-                const double eu8_v2 = (n_u8 > 1) ? std::sqrt(std::max(0.0, v2_u8_sq[k] / n_u8 - u8_v2 * u8_v2) / n_u8) : 0.0;
+                double m_v1 = 0.0, e_v1 = 0.0, n_st = 0.0, m_v2 = 0.0, e_v2 = 0.0, d1 = 0.0;
+                eval_w_stat(pt_wsum[k], pt_w2[k], v1_sum[k], v1_sq[k], m_v1, e_v1, n_st);
+                eval_w_stat(pt_wsum[k], pt_w2[k], v2_sum[k], v2_sq[k], m_v2, e_v2, d1);
 
-                const double n_u4 = u4_cnt[k];
-                const double u4_v1 = (n_u4 > 0) ? (v1_u4_sum[k] / n_u4) : 0.0;
-                const double u4_v2 = (n_u4 > 0) ? (v2_u4_sum[k] / n_u4) : 0.0;
-                const double eu4_v1 = (n_u4 > 1) ? std::sqrt(std::max(0.0, v1_u4_sq[k] / n_u4 - u4_v1 * u4_v1) / n_u4) : 0.0;
-                const double eu4_v2 = (n_u4 > 1) ? std::sqrt(std::max(0.0, v2_u4_sq[k] / n_u4 - u4_v2 * u4_v2) / n_u4) : 0.0;
+                double u8_v1 = 0.0, eu8_v1 = 0.0, n_u8 = 0.0, u8_v2 = 0.0, eu8_v2 = 0.0;
+                eval_w_stat(u8_wsum[k], u8_w2[k], v1_u8_sum[k], v1_u8_sq[k], u8_v1, eu8_v1, n_u8);
+                eval_w_stat(u8_wsum[k], u8_w2[k], v2_u8_sum[k], v2_u8_sq[k], u8_v2, eu8_v2, d1);
+
+                double u4_v1 = 0.0, eu4_v1 = 0.0, n_u4 = 0.0, u4_v2 = 0.0, eu4_v2 = 0.0;
+                eval_w_stat(u4_wsum[k], u4_w2[k], v1_u4_sum[k], v1_u4_sq[k], u4_v1, eu4_v1, n_u4);
+                eval_w_stat(u4_wsum[k], u4_w2[k], v2_u4_sum[k], v2_u4_sq[k], u4_v2, eu4_v2, d1);
 
                 f << cat_names[c] << "," << b << "," << y_c << "," << y0_c << ","
                   << dn_dy << "," << dn_dy0 << ","
@@ -232,9 +246,8 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
             for (int b = 0; b < N_UBINS; ++b) {
                 const int ku = c * N_UBINS + b;
                 const double u_c = UT0_MIN + (b + 0.5) * dut0;
-                const double n_u = ut_cnt[ku];
-                const double mv = (n_u > 0) ? (ut_v2_sum[ku] / n_u) : 0.0;
-                const double ev = (n_u > 1) ? std::sqrt(std::max(0.0, ut_v2_sq[ku] / n_u - mv * mv) / n_u) : 0.0;
+                double mv = 0.0, ev = 0.0, n_u = 0.0;
+                eval_w_stat(ut_wsum[ku], ut_w2[ku], ut_v2_sum[ku], ut_v2_sq[ku], mv, ev, n_u);
                 fu << cat_names[c] << "," << b << "," << u_c << "," << mv << "," << ev << "," << n_u << "\n";
             }
         }

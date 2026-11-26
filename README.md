@@ -1,6 +1,6 @@
 # CUDA Relativistic Hadron & Light-Cluster ($A \le 6$) Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-22%2F22%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-23%2F23%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -320,6 +320,7 @@ python3 scripts/generate_animations.py
 20. **`test_pauli_blocking_and_interacting_hcgf`**: Verifies 6D phase-space occupancy (`f_core = 0.98`), `87.8%` Pauli suppression of cold intra-nuclear ${}^{197}\text{Au}$ Fermi-sea collisions, and quantum Fermi–Dirac / Bose–Einstein INCG EoS inversion (`T_fr = 7.71 MeV`, `${}^4\text{He} = 21.8` at $e_{\text{tr}} = +2\;\text{MeV}/B$).
 21. **`test_poisson_coulomb_potential_and_energy_conservation`**: Verifies 3D separable spectral Poisson electrostatic solver (`include/physics/coulomb_poisson.cuh`) with $\ell \le 2$ multipole open-boundary conditions against an analytical $Z=79$ sphere ($\Phi_C(0) = 24.51/25.09\;\text{MeV}$, $E_{\text{Coul}} = 0.777/0.793\;\text{GeV}$), outward Coulomb proton radial impulse, and symplectic Hamiltonian conservation ($|\Delta H|/H = 1.51 \times 10^{-4}$, $|\Delta\vec{P}| < 10^{-11}\;\text{GeV}/c$).
 22. **`test_grand_canonical_freezeout_sampling`**: Verifies unconstrained Cooper–Frye `GrandCanonical` Poisson sampling (`--sampling gc`) on sparse $1\;\text{fm}^3$ cells, confirming ensemble $\langle B \rangle, \langle Q \rangle$ consistency, $d/{}^4\text{He}$ production, and Pratt–Torrieri local momentum-anisotropy transfer.
+23. **`test_freezeout_oversampling_and_backflow_remelt`**: Verifies $M\times$ freeze-out oversampling (`--fo-oversample 40`) and species-preserving systematic backflow resampling down to the $N_{\text{test}}$-per-nucleon transport scale prior to dense Mott remelting (`12/12` $d$ remelted, `8/8` $p$ reabsorbed, `780` thinned, $\Delta B_{\text{dense}} = +32$, $\Delta Q_{\text{dense}} = +20$ exact).
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering, Breit–Wigner spectral functions, and $2 \leftrightarrow 1$ / $2 \leftrightarrow 2$ detailed balance across **58 species** ($p, n, \pi, \Delta(1232)$, bound $d, t, {}^3\text{He}, {}^4\text{He}, {}^6\text{He}, {}^6\text{Li}$, and 43 TUNL $A=2,4,5,6$ resonances)

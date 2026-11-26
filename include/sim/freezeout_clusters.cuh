@@ -41,6 +41,7 @@ struct FreezeoutConfig {
     ClusterMode mode = ClusterMode::Microscopic;
     BackflowMode backflow = BackflowMode::RemeltInDense;
     FreezeoutSampling sampling = FreezeoutSampling::MicrocanonicalParcel;
+    int oversample_factor = 1;        // Freeze-out Poisson oversampling factor M >= 1 (backflow resamples to N_test!)
     double n_fr_fm3 = 0.040;          // Freeze-out Eckart baryon density threshold (~rho_0 / 4) [fm^-3]
     double melt_factor = 1.15;        // Hysteresis ratio n_melt / n_fr for re-entering dense matter
     double min_time_fm = 0.0;         // Minimum time before expansion freeze-out check activates [fm/c]
@@ -332,6 +333,7 @@ public:
         reabsorbed_nucleons_ = 0;
         remelted_clusters_ = 0;
         back_emitted_total_ = 0;
+        thinned_oversamples_ = 0;
     }
 
     // Track local Eckart baryon density n_B(c) across grid cells; handle back-emitted particles
@@ -368,6 +370,10 @@ public:
         const double n_melt = cfg_.melt_factor * cfg_.n_fr_fm3;
         if (!force_finalize && cfg_.backflow != BackflowMode::GhostFreeStream) {
             std::vector<std::vector<std::size_t>> dense_nucleons(nc), back_clusters(nc);
+            PhiloxRng thin_rng(seed ^ 0x7A11C0DEULL, static_cast<std::uint64_t>(step), 0ULL);
+            double species_acc[NUM_SPECIES] = {};
+            for (int id = 0; id < NUM_SPECIES; ++id) species_acc[id] = thin_rng.uniform();
+
             for (std::size_t i = 0; i < host_p.size(); ++i) {
                 const SpeciesInfo sp = get_species_info(host_p[i].species);
                 if (sp.baryon_num <= 0) continue;
@@ -377,6 +383,21 @@ public:
                 if (ix < 0 || ix >= gcfg_.nx || iy < 0 || iy >= gcfg_.ny || iz < 0 || iz >= gcfg_.nz) continue;
                 const int c = mf_detail::cell_flat(ix, iy, iz, gcfg_);
                 if (snap.fields[20][c] <= n_melt) continue;
+
+                // Systematic resampling of oversampled backflow (freezeout_tag = M > 1) back down to
+                // the simulation's N_test-per-nucleon scale BEFORE reabsorption / Mott remelting!
+                if (host_p[i].freezeout_tag > 1) {
+                    species_acc[host_p[i].species] += 1.0 / static_cast<double>(host_p[i].freezeout_tag);
+                    if (species_acc[host_p[i].species] >= 1.0) {
+                        species_acc[host_p[i].species] -= 1.0;
+                        host_p[i].freezeout_tag = 1;  // Promoted to 1 / N_test transport scale!
+                    } else {
+                        remove_mask[i] = 1;
+                        ++thinned_oversamples_;
+                        mutated = true;
+                        continue;
+                    }
+                }
 
                 if (host_p[i].freezeout_tag != 0 && sp.baryon_num == 1) {
                     host_p[i].freezeout_tag = 0;
@@ -586,7 +607,7 @@ public:
                                   ? (static_cast<double>(Np) / static_cast<double>(Bc))
                                   : std::clamp(static_cast<double>(snap.fields[14][c]) /
                                                static_cast<double>(snap.fields[10][c]),
-                                               0.05, 0.95);
+                                               0.001, 0.999);
 
             double T_gev = 0.0, muB_gev = 0.0, muQ_gev = 0.0, n_eq[NUM_SPECIES] = {};
             fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
@@ -639,6 +660,7 @@ public:
                     vxg = snap.fields[21][c]; vyg = snap.fields[22][c]; vzg = snap.fields[23][c];
                     u0g = 1.0 / std::sqrt(1.0 - std::min(0.9990, vxg * vxg + vyg * vyg + vzg * vzg));
                 }
+                const int m_over = std::max(1, cfg_.oversample_factor);
                 int n_cl_gc = 0, inward_gc = 0;
                 std::size_t slot_cur = 0;
 
@@ -648,7 +670,7 @@ public:
                         continue;
                     }
                     if (sp.is_excited && !cfg_.include_excited_clusters) continue;
-                    const int n_draw = fo_detail::sample_poisson(vol_scale * n_eq[id], rng);
+                    const int n_draw = fo_detail::sample_poisson(static_cast<double>(m_over) * vol_scale * n_eq[id], rng);
                     for (int d = 0; d < n_draw; ++d) {
                         const double mk = sp.is_excited ? sample_thermal_breit_wigner_mass(id, T_gev, rng)
                                                         : sp.pole_mass_gev;
@@ -674,18 +696,20 @@ public:
                         ++slot_cur;
                         hp.species = id; hp.mass = mk;
                         hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
-                        hp.collided = 5; hp.freezeout_tag = 1;
+                        hp.collided = 5; hp.freezeout_tag = m_over;
                         spawned.push_back(hp);
                         if (sp.baryon_num >= 2) ++n_cl_gc;
                     }
                 }
                 for (std::size_t idx : idxs) remove_mask[idx] = 1;
-                rec.clusters_formed = n_cl_gc;
-                rec.back_emitted = inward_gc;
+                const int cl_scaled = static_cast<int>(std::llround(static_cast<double>(n_cl_gc) / m_over));
+                const int in_scaled = static_cast<int>(std::llround(static_cast<double>(inward_gc) / m_over));
+                rec.clusters_formed = cl_scaled;
+                rec.back_emitted = in_scaled;
                 records_.push_back(rec);
                 total_baryons_converted_ += Bc;
-                total_clusters_formed_ += n_cl_gc;
-                back_emitted_total_ += inward_gc;
+                total_clusters_formed_ += cl_scaled;
+                back_emitted_total_ += in_scaled;
                 mutated = true;
                 continue;
             }
@@ -885,6 +909,7 @@ public:
     long long reabsorbed_nucleons() const { return reabsorbed_nucleons_; }
     long long remelted_clusters() const { return remelted_clusters_; }
     long long back_emitted_total() const { return back_emitted_total_; }
+    long long thinned_oversamples() const { return thinned_oversamples_; }
 
 private:
     FreezeoutConfig cfg_;
@@ -897,6 +922,7 @@ private:
     long long reabsorbed_nucleons_ = 0;
     long long remelted_clusters_ = 0;
     long long back_emitted_total_ = 0;
+    long long thinned_oversamples_ = 0;
 };
 
 }  // namespace transport

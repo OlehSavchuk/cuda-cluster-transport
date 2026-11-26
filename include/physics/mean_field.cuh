@@ -300,7 +300,8 @@ HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
         pyw = p.py[i] * norm_inv_n_dV;
         pzw = p.pz[i] * norm_inv_n_dV;
     }
-    const double zq = do_coul ? (static_cast<double>(sp.charge) * norm_inv_n_dV) : 0.0;
+    const double inv_fo = (p.freezeout_tag[i] > 1) ? (1.0 / static_cast<double>(p.freezeout_tag[i])) : 1.0;
+    const double zq = do_coul ? (static_cast<double>(sp.charge) * norm_inv_n_dV * inv_fo) : 0.0;
 
     for (int dz = 0; dz <= 1; ++dz) {
         const int iz = wrap_or_clamp_idx(k0 + dz, mf.gcfg.nz, mf.gcfg.boundary);
@@ -526,13 +527,14 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
     const double dpx = fx * dt;
     const double dpy = fy * dt;
     const double dpz = fz * dt;
-    const double w_cm = static_cast<double>(p.mass[i]);
+    const double inv_fo = (p.freezeout_tag[i] > 1) ? (1.0 / static_cast<double>(p.freezeout_tag[i])) : 1.0;
+    const double w_cm = static_cast<double>(p.mass[i]) * inv_fo;
     p.px[i] += dpx;
     p.py[i] += dpy;
     p.pz[i] += dpz;
-    portable_atomic_add_double(&cm_accum[0], dpx);
-    portable_atomic_add_double(&cm_accum[1], dpy);
-    portable_atomic_add_double(&cm_accum[2], dpz);
+    portable_atomic_add_double(&cm_accum[0], dpx * inv_fo);
+    portable_atomic_add_double(&cm_accum[1], dpy * inv_fo);
+    portable_atomic_add_double(&cm_accum[2], dpz * inv_fo);
     portable_atomic_add_double(&cm_accum[3], w_cm);
 }
 

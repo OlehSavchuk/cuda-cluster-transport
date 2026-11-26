@@ -62,6 +62,9 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
 
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < p.n; i += blockDim.x * gridDim.x) {
         if (!p.active[i]) continue;
+        const double w_fo = (p.freezeout_tag[i] > 1)
+                                ? (1.0 / static_cast<double>(p.freezeout_tag[i]))
+                                : 1.0;
 
         const double E = p.E[i];
         const double px = p.px[i];
@@ -72,14 +75,14 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
         const int sp_id = p.species[i];
         const SpeciesInfo sp = get_species_info(sp_id);
 
-        lE += E;
-        lPx += px;
-        lPy += py;
-        lPz += pz;
-        lTxx += px * px * inv_E;
-        lTyy += py * py * inv_E;
-        lTzz += pz * pz * inv_E;
-        lr2 += p.x[i] * p.x[i] + p.y[i] * p.y[i] + p.z[i] * p.z[i];
+        lE += w_fo * E;
+        lPx += w_fo * px;
+        lPy += w_fo * py;
+        lPz += w_fo * pz;
+        lTxx += w_fo * px * px * inv_E;
+        lTyy += w_fo * py * py * inv_E;
+        lTzz += w_fo * pz * pz * inv_E;
+        lr2 += w_fo * (p.x[i] * p.x[i] + p.y[i] * p.y[i] + p.z[i] * p.z[i]);
 
         lB += static_cast<unsigned long long>(sp.baryon_num);
         lQ += static_cast<long long>(sp.charge);
@@ -165,8 +168,12 @@ public:
         obs.charge_tot = static_cast<long long>(h_bq[1]);
         obs.n_active = static_cast<int>(h_bq[2]);
 #else
+        double b_acc = 0.0, q_acc = 0.0;
         for (int i = 0; i < np; ++i) {
             if (!pview.active[i]) continue;
+            const double w_fo = (pview.freezeout_tag[i] > 1)
+                                    ? (1.0 / static_cast<double>(pview.freezeout_tag[i]))
+                                    : 1.0;
             const double E = pview.E[i];
             const double px = pview.px[i];
             const double py = pview.py[i];
@@ -177,22 +184,24 @@ public:
             const SpeciesInfo sp = get_species_info(sp_id);
 
             obs.n_active += 1;
-            obs.E_tot += E;
-            obs.Px_tot += px;
-            obs.Py_tot += py;
-            obs.Pz_tot += pz;
-            obs.Txx_sum += px * px * inv_E;
-            obs.Tyy_sum += py * py * inv_E;
-            obs.Tzz_sum += pz * pz * inv_E;
-            obs.r_sq_sum += pview.x[i] * pview.x[i] +
-                            pview.y[i] * pview.y[i] +
-                            pview.z[i] * pview.z[i];
-            obs.baryon_tot += sp.baryon_num;
-            obs.charge_tot += sp.charge;
+            obs.E_tot += w_fo * E;
+            obs.Px_tot += w_fo * px;
+            obs.Py_tot += w_fo * py;
+            obs.Pz_tot += w_fo * pz;
+            obs.Txx_sum += w_fo * px * px * inv_E;
+            obs.Tyy_sum += w_fo * py * py * inv_E;
+            obs.Tzz_sum += w_fo * pz * pz * inv_E;
+            obs.r_sq_sum += w_fo * (pview.x[i] * pview.x[i] +
+                                    pview.y[i] * pview.y[i] +
+                                    pview.z[i] * pview.z[i]);
+            b_acc += w_fo * sp.baryon_num;
+            q_acc += w_fo * sp.charge;
             obs.counts[sp_id] += 1;
-            obs.kinetic_energy_sum[sp_id] += (E - m);
+            obs.kinetic_energy_sum[sp_id] += w_fo * (E - m);
             obs.mass_sum[sp_id] += m;
         }
+        obs.baryon_tot = std::llround(b_acc);
+        obs.charge_tot = std::llround(q_acc);
 #endif
         return obs;
     }

@@ -1425,6 +1425,138 @@ void test_grand_canonical_freezeout_sampling() {
                 b_out, B_PHYS, q_out, Z_PHYS, n_d, n_he4, sq_gc);
 }
 
+void test_freezeout_oversampling_and_backflow_remelt() {
+    // 1. Verify M_over = 40 freeze-out oversampling produces 40x raw cluster stats with unbiased <B>, <Q>, yields
+    GridConfig gcfg{};
+    gcfg.nx = 10; gcfg.ny = 10; gcfg.nz = 10;
+    gcfg.xmin = 0.0; gcfg.xmax = 10.0; gcfg.ymin = 0.0; gcfg.ymax = 10.0; gcfg.zmin = 0.0; gcfg.zmax = 10.0;
+    gcfg.boundary = BoundaryMode::PeriodicBox;
+
+    constexpr int NT = 15, B_PHYS = 15, Z_PHYS = 6, M_OVER = 40;
+    PhiloxRng rng(991155ULL, 0ULL, 0ULL);
+    std::vector<HostParticle> init_p;
+    for (int i = 0; i < B_PHYS * NT; ++i) {
+        HostParticle hp{};
+        hp.species = (i < Z_PHYS * NT) ? PROTON : NEUTRON;
+        hp.mass = get_species_info(hp.species).pole_mass_gev;
+        hp.x = 10.0 * rng.uniform(); hp.y = 10.0 * rng.uniform(); hp.z = 10.0 * rng.uniform();
+        const double qx = std::sqrt(hp.mass * 0.004) * rng.normal();
+        const double qy = std::sqrt(hp.mass * 0.014) * rng.normal();
+        const double qz = std::sqrt(hp.mass * 0.006) * rng.normal();
+        hp.E = std::sqrt(hp.mass * hp.mass + qx * qx + qy * qy + qz * qz);
+        hp.px = qx; hp.py = qy; hp.pz = qz;
+        init_p.push_back(hp);
+    }
+
+    // Compare 1 single M_OVER = 40 oversampled pass against the mean of 40 independent M_OVER = 1 passes!
+    double b_ens = 0.0, q_ens = 0.0, cl_ens = 0.0;
+    for (int r = 0; r < M_OVER; ++r) {
+        ParticleSystem ps1; ps1.upload(init_p);
+        FreezeoutConfig fc1{};
+        fc1.mode = ClusterMode::FreezeoutThermal;
+        fc1.sampling = FreezeoutSampling::GrandCanonical;
+        fc1.oversample_factor = 1;
+        fc1.n_fr_fm3 = 0.025;
+        FreezeoutCellClusterizer clz1(fc1, gcfg);
+        clz1.process_step(ps1, 1, 5.0, NT, make_mean_field_config(EOSPreset::MDSoft), 4000ULL + r * 97ULL, true);
+        for (const auto& hp : ps1.download()) {
+            const SpeciesInfo sp = get_species_info(hp.species);
+            b_ens += sp.baryon_num;
+            q_ens += sp.charge;
+            if (sp.baryon_num >= 2) cl_ens += 1.0;
+        }
+    }
+    b_ens /= M_OVER; q_ens /= M_OVER; cl_ens /= M_OVER;
+
+    ParticleSystem ps; ps.upload(init_p);
+    FreezeoutConfig fc{};
+    fc.mode = ClusterMode::FreezeoutThermal;
+    fc.sampling = FreezeoutSampling::GrandCanonical;
+    fc.oversample_factor = M_OVER;
+    fc.n_fr_fm3 = 0.025;
+    FreezeoutCellClusterizer clz(fc, gcfg);
+    clz.process_step(ps, 1, 5.0, NT, make_mean_field_config(EOSPreset::MDSoft), 3030ULL, true);
+
+    ObservableCalculator obs_calc;
+    const GlobalObservables obs_ov = obs_calc.compute(ps);
+    int raw_cl = 0;
+    for (const auto& hp : ps.download()) {
+        if (get_species_info(hp.species).baryon_num >= 2) ++raw_cl;
+    }
+    TEST_ASSERT(std::fabs(raw_cl / static_cast<double>(M_OVER) - cl_ens) / cl_ens < 0.06 &&
+                std::fabs(static_cast<double>(obs_ov.baryon_tot) - b_ens) / b_ens < 0.03 &&
+                std::fabs(static_cast<double>(obs_ov.charge_tot) - q_ens) / q_ens < 0.04,
+                "1x M_OVER=40 pass failed to match 40x M_OVER=1 ensemble mean");
+
+    // 2. Verify oversampled backflow (freezeout_tag = M_OVER) systematically resamples to N_test scale & remelts!
+    GridConfig g2{};
+    g2.nx = 4; g2.ny = 4; g2.nz = 4;
+    g2.xmin = 0.0; g2.xmax = 8.0; g2.ymin = 0.0; g2.ymax = 8.0; g2.zmin = 0.0; g2.zmax = 8.0;
+    g2.boundary = BoundaryMode::PeriodicBox;
+
+    constexpr int NT2 = 10;
+    std::vector<HostParticle> core_p;
+    // Dense bath: 80 test nucleons in cell (1,1,1) [x,y,z in 2..4 fm, dV = 8 fm^3] -> n_B ~ 1.0 / (8) * ... > n_melt
+    for (int i = 0; i < 160; ++i) {
+        HostParticle hp{};
+        hp.species = (i % 2 == 0) ? PROTON : NEUTRON;
+        hp.mass = get_species_info(hp.species).pole_mass_gev;
+        hp.x = 2.5 + 1.0 * rng.uniform(); hp.y = 2.5 + 1.0 * rng.uniform(); hp.z = 2.5 + 1.0 * rng.uniform();
+        const double qx = 0.14 * rng.normal(), qy = 0.14 * rng.normal(), qz = 0.14 * rng.normal();
+        hp.E = std::sqrt(hp.mass * hp.mass + qx * qx + qy * qy + qz * qz);
+        hp.px = qx; hp.py = qy; hp.pz = qz;
+        core_p.push_back(hp);
+    }
+    // Inject 40 * 12 = 480 oversampled deuterons (= 12 test d -> 24 B, 12 Q) + 40 * 8 = 320 oversampled protons (= 8 B, 8 Q)
+    for (int i = 0; i < M_OVER * 12; ++i) {
+        HostParticle hd{};
+        hd.species = DEUTERON; hd.mass = get_species_info(DEUTERON).pole_mass_gev;
+        hd.x = 3.0; hd.y = 3.0; hd.z = 3.0;
+        hd.px = 0.12; hd.py = -0.08; hd.pz = 0.05;
+        hd.E = std::sqrt(hd.mass * hd.mass + hd.px * hd.px + hd.py * hd.py + hd.pz * hd.pz);
+        hd.freezeout_tag = M_OVER;
+        core_p.push_back(hd);
+    }
+    for (int i = 0; i < M_OVER * 8; ++i) {
+        HostParticle hp{};
+        hp.species = PROTON; hp.mass = phys::MASS_PROTON;
+        hp.x = 3.0; hp.y = 3.0; hp.z = 3.0;
+        hp.px = -0.10; hp.py = 0.06; hp.pz = -0.04;
+        hp.E = std::sqrt(hp.mass * hp.mass + hp.px * hp.px + hp.py * hp.py + hp.pz * hp.pz);
+        hp.freezeout_tag = M_OVER;
+        core_p.push_back(hp);
+    }
+
+    ParticleSystem ps2; ps2.upload(core_p);
+    FreezeoutConfig fc2{};
+    fc2.mode = ClusterMode::FreezeoutThermal;
+    fc2.sampling = FreezeoutSampling::GrandCanonical;
+    fc2.oversample_factor = M_OVER;
+    fc2.n_fr_fm3 = 0.020;  // n_melt = 0.023 fm^-3 << core n_B (~0.20 fm^-3)
+    fc2.min_time_fm = 0.0;
+    FreezeoutCellClusterizer clz2(fc2, g2);
+    clz2.process_step(ps2, 1, 2.0, NT2, make_mean_field_config(EOSPreset::None), 9090ULL, false);
+
+    int active_dense_b = 0, active_dense_q = 0, rem_frozen_cl = 0;
+    for (const auto& hp : ps2.download()) {
+        const SpeciesInfo sp = get_species_info(hp.species);
+        if (hp.freezeout_tag == 0) {
+            active_dense_b += sp.baryon_num;
+            active_dense_q += sp.charge;
+        } else if (sp.baryon_num >= 2) {
+            ++rem_frozen_cl;
+        }
+    }
+    TEST_ASSERT(clz2.remelted_clusters() == 12 && clz2.reabsorbed_nucleons() == 8 &&
+                clz2.thinned_oversamples() == (480 - 12) + (320 - 8) && rem_frozen_cl == 0,
+                "Backflow systematic resampling + Mott remelt did not promote exact 12 d + 8 p");
+    TEST_ASSERT(active_dense_b == 160 + 24 + 8 && active_dense_q == 80 + 12 + 8,
+                "Backflow resampling + remelt violated N_test-scaled baryon or charge conservation");
+    std::printf("[PASS] test_freezeout_oversampling_and_backflow_remelt (M=%d: raw_cl=%d, remelt=%lld/12 d, reabs=%lld/8 p, thinned=%lld, B_dense=%d/192)\n",
+                M_OVER, raw_cl, clz2.remelted_clusters(), clz2.reabsorbed_nucleons(),
+                clz2.thinned_oversamples(), active_dense_b);
+}
+
 }  // namespace
 
 int main() {
@@ -1453,6 +1585,7 @@ int main() {
     test_pauli_blocking_and_interacting_hcgf();
     test_poisson_coulomb_potential_and_energy_conservation();
     test_grand_canonical_freezeout_sampling();
+    test_freezeout_oversampling_and_backflow_remelt();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;
