@@ -12,8 +12,8 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### 1. Microscopic Dynamical Clusters vs. Pure $N+\Delta+\pi$ + HCGF $T^{\mu\nu}$ Grid Freeze-Out ($n_B < n_{\text{fr}}$)
-Direct side-by-side comparison (`scripts/compare_microscopic_vs_hcgf_freezeout.py`) in FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ (`MD-Soft`) between **full microscopic dynamical cluster transport** (`--cluster-mode microscopic`) and **pure hadronic ($N + \Delta + \pi$) transport** with 24-field `HCGF` stress-energy tensor $T^{\mu\nu}$ export (`--dump-tmunu-dir`) and conservative local thermal clusterization in grid cells crossing $n_{B,\text{LRF}} < n_{\text{fr}}$ (`--cluster-mode freezeout --nfr 0.04`):
+### 1. Microscopic Dynamical Clusters vs. Baryon-Only Eckart-Frame ($u^0 E - \vec{P}\cdot\vec{u}$) HCGF Freeze-Out ($n_B < n_{\text{fr}}$)
+Direct side-by-side comparison (`scripts/compare_microscopic_vs_hcgf_freezeout.py`) in FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ (`MD-Soft`) between **full microscopic dynamical cluster transport** (`--cluster-mode microscopic`) and **pure hadronic ($N + \Delta + \pi$) transport** with baryon-only **Eckart-frame** 24-field `HCGF` stress-energy tensor $T_B^{\mu\nu}$ export (`--dump-tmunu-dir`), cell rest-frame energy $E_{\text{rest}} = u^0 E - \vec{P}\cdot\vec{u}$ EoS inversion, and conservative Mott re-melting of back-emitted particles (`--cluster-mode freezeout --backflow remelt --nfr 0.04`):
 
 <p align="center">
   <img src="assets/hcgf_vs_microscopic_comparison.png" alt="Microscopic Dynamical Clusters vs HCGF Tmunu Grid Freeze-Out Clusters" width="100%">
@@ -184,14 +184,14 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 └── assets/                         # Rendered animations and spectral/cross-section plots
 ```
 
-### Binary 3D Stress-Energy Tensor Format for HCGF (`HCGF`)
-Passing `--dump-tmunu-dir <dir> --dump-tmunu-every <N>` writes self-describing binary 3D grid files `tmunu_grid_XXXX.bin` (`include/sim/hcgf_io.cuh`):
+### Binary 3D Baryon Stress-Energy Tensor Format for HCGF (`HCGF`, Eckart Frame)
+Passing `--dump-tmunu-dir <dir> --dump-tmunu-every <N>` writes self-describing binary 3D grid files `tmunu_grid_XXXX.bin` (`include/sim/hcgf_io.cuh`, coarse-grained strictly over **baryons $B > 0$**, excluding pions):
 - **88-byte header (`HcgfTmunuHeader`)**: `uint32 magic = 0x46474348 ("HCGF")`, `int32 version=1, step, nx, ny, nz, n_fields=24, reserved`, `float64 t_fm, xmin, xmax, ymin, ymax, zmin, zmax`.
 - **24 contiguous `float32` 3D arrays** of shape `(nz, ny, nx)`:
-  - `[0..9]`: Symmetric $T^{\mu\nu}$ (`T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz` in $\text{GeV}/\text{fm}^3$, kinetic + covariant Skyrme/MD interaction tensor).
+  - `[0..9]`: Symmetric baryon $T_B^{\mu\nu}$ (`T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz` in $\text{GeV}/\text{fm}^3$, kinetic + covariant Skyrme/MD interaction tensor).
   - `[10..13]`: Baryon 4-current $J_B^\mu$ (`JB0, JBx, JBy, JBz` in $\text{fm}^{-3}$).
-  - `[14..17]`: Electric charge 4-current $J_Q^\mu$ (`JQ0, JQx, JQy, JQz` in $\text{fm}^{-3}$).
-  - `[18..23]`: Exact Landau rest-frame fields (`eps_LRF, P_LRF` in $\text{GeV}/\text{fm}^3$, `nB_LRF` in $\text{fm}^{-3}$, `vx_L, vy_L, vz_L` in $c$).
+  - `[14..17]`: Baryonic electric charge 4-current $J_{Q,B}^\mu$ (`JQ0, JQx, JQy, JQz` in $\text{fm}^{-3}$).
+  - `[18..23]`: Exact **Eckart rest-frame** fields ($u^\mu = J_B^\mu / n_B$: `eps_Eckart = u_mu T_B^munu u_nu, P_Eckart` in $\text{GeV}/\text{fm}^3$, `nB_Eckart` in $\text{fm}^{-3}$, `vx_E, vy_E, vz_E` in $c$).
 
 ### Binary 3D Local Energy & Baryon Density Format (`CHYD`)
 Passing `--dump-hydro-dir <dir> --dump-hydro-every <N>` writes self-describing binary 3D grid files `hydro_grid_XXXX.bin` (`include/sim/hydro_io.cuh`):
@@ -270,8 +270,8 @@ python3 scripts/generate_animations.py
 13. **`test_in_medium_collision_energy_conservation`**: Verifies `--in-medium-ec <off|on|exact>` across coupled $2\leftrightarrow 2$ and $2\leftrightarrow 1$ reactions under `MDStiff`, reducing $|\Delta H|/H$ from $1.93 \times 10^{-3}$ (`off`) $\to 2.32 \times 10^{-5}$ (`on`, per-vertex quasi-energy root solver) $\to 1.86 \times 10^{-14}$ (`exact`, + Hamiltonian manifold projection).
 14. **`test_pion_delta_cross_sections_and_detailed_balance`**: Verifies PDG $\pi^+ p \to \Delta^{++}$ (`192.8 mb`) & $\pi^- p \to \Delta^0$ (`64.2 mb`) $3:1$ Clebsch–Gordan cross sections and grand-canonical $\pi\text{–}\Delta\text{–}N\text{–}d$ detailed balance with exact signed electric charge ($\Delta Q = 0$) conservation.
 15. **`test_hic_pion_and_delta_production`**: Verifies dynamical $\Delta(1232)$ excitation, $\pi^-/\pi^+$ neutron-rich isospin asymmetry, and machine-precision Hamiltonian conservation (`|dH|/H = 1.24e-15`) in $\text{Au}+\text{Au}$ @ $800\,A\;\text{MeV}$.
-16. **`test_hcgf_tmunu_and_landau_frame`**: Verifies 24-field `HCGF` $T^{\mu\nu} + J_B^\mu + J_Q^\mu$ grid conservation ($\int T^{00} d^3x = E$, $\int T^{0z} d^3x = P_z$) and exact relativistic Landau 4-velocity recovery.
-17. **`test_pure_hadron_and_grid_freezeout_clusters`**: Verifies cluster-free pure $N+\Delta+\pi$ transport (`--cluster-mode none`) and conservative $n_B < n_{\text{fr}}$ local thermal clusterization (`--cluster-mode freezeout`, $|\Delta E|/E = 6.91 \times 10^{-15}$, $\Delta B = \Delta Q = 0$).
+16. **`test_hcgf_baryon_eckart_frame`**: Verifies 24-field baryon-only `HCGF` $T_B^{\mu\nu} + J_B^\mu + J_{Q,B}^\mu$ conservation (excluding injected counter-streaming pions) and exact relativistic Eckart 4-velocity $u^\mu = J_B^\mu / n_B$ recovery.
+17. **`test_eckart_freezeout_and_remelt`**: Verifies cluster-free pure $N+\Delta+\pi$ transport (`--cluster-mode none`), Eckart $E_{\text{rest}} = u^0 E - \vec{P}\cdot\vec{u}$ local thermal clusterization (`--cluster-mode freezeout`), and conservative Mott re-melting (`25/25`) of back-emitted clusters re-entering dense $n_B > n_{\text{melt}}$ matter ($|\Delta E|/E < 10^{-13}$, $\Delta B = \Delta Q = 0$).
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA

@@ -215,8 +215,9 @@ HD_INLINE double sample_cic_scalar(const Real* field, double x, double y, double
     return val;
 }
 
-// Compute centered gradient at grid cell (ix, iy, iz) and interpolate via CIC to (x, y, z)
-HD_INLINE void cell_centered_grad(const Real* field, int ix, int iy, int iz,
+// Compute centered gradient at grid cell (ix, iy, iz)
+template <typename FieldT>
+HD_INLINE void cell_centered_grad(const FieldT* field, int ix, int iy, int iz,
                                   const GridConfig& g,
                                   double& gx, double& gy, double& gz) {
     const int ixp = wrap_or_clamp_idx(ix + 1, g.nx, g.boundary);

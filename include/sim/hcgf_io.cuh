@@ -18,12 +18,13 @@
 
 namespace transport {
 
-// Self-describing binary 3D Stress-Energy Tensor & Conserved Currents header for HCGF ("HCGF", 88 bytes)
+// Self-describing binary 3D Baryon Stress-Energy Tensor & Eckart-Frame header for HCGF ("HCGF", 88 bytes)
+// Coarse-grained strictly over BARYONS (B > 0; mesons/pions with B = 0 are excluded!).
 // Followed immediately by 24 contiguous float32 3D arrays of length nx * ny * nz:
-//   [0..9]   T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz  [GeV / fm^3] (kinetic + mean-field)
-//   [10..13] JB0, JBx, JBy, JBz                                [fm^-3]      (baryon 4-current)
-//   [14..17] JQ0, JQx, JQy, JQz                                [fm^-3]      (electric charge 4-current)
-//   [18..23] eps_LRF [GeV/fm^3], P_LRF [GeV/fm^3], nB_LRF [fm^-3], vx_L [c], vy_L [c], vz_L [c]
+//   [0..9]   T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz  [GeV / fm^3] (baryon kinetic + mean-field)
+//   [10..13] JB0, JBx, JBy, JBz                                [fm^-3]      (baryon 4-current J_B^mu)
+//   [14..17] JQ0, JQx, JQy, JQz                                [fm^-3]      (baryonic charge 4-current)
+//   [18..23] eps_E [GeV/fm^3], P_E [GeV/fm^3], nB_E [fm^-3], vx_E [c], vy_E [c], vz_E [c] (Eckart frame!)
 #pragma pack(push, 1)
 struct HcgfTmunuHeader {
     std::uint32_t magic = 0x46474348U;  // "HCGF"
@@ -47,51 +48,42 @@ struct HcgfGridSnapshot {
 
 namespace hcgf_detail {
 
-// Solve exact 4D Landau rest-frame eigenvalue problem T^mu_nu u^nu = eps_LRF u^mu:
-//   eps = T00 - S . v,   (eps * I + T_spatial) v = S,   with |v| < 0.9995
-inline void solve_landau_frame(double T00, double Sx, double Sy, double Sz,
-                               double Txx, double Txy, double Txz,
-                               double Tyy, double Tyz, double Tzz,
-                               double& eps_lrf, double& P_lrf,
-                               double& vx, double& vy, double& vz) {
-    if (T00 <= 1.0e-12) {
-        eps_lrf = 0.0; P_lrf = 0.0;
-        vx = 0.0; vy = 0.0; vz = 0.0;
+// Extract Eckart collective 4-velocity u^mu = J_B^mu / n_B = gamma_E * (1, v_E) from baryon 4-current,
+// and project baryon stress-energy tensor T_B^munu into the Eckart rest frame:
+//   eps_E = u_mu T_B^munu u_nu,   P_E = (eps_E - g_munu T_B^munu) / 3
+inline void eval_eckart_frame(double JB0, double JBx, double JBy, double JBz,
+                              double T00, double T0x, double T0y, double T0z,
+                              double Txx, double Txy, double Txz,
+                              double Tyy, double Tyz, double Tzz,
+                              double& nB_e, double& eps_e, double& P_e,
+                              double& vx_e, double& vy_e, double& vz_e) {
+    if (JB0 <= 1.0e-12 || T00 <= 1.0e-12) {
+        nB_e = 0.0; eps_e = 0.0; P_e = 0.0;
+        vx_e = 0.0; vy_e = 0.0; vz_e = 0.0;
         return;
     }
-    vx = Sx / T00; vy = Sy / T00; vz = Sz / T00;
-    auto clamp_v = [&]() {
-        const double v2 = vx * vx + vy * vy + vz * vz;
-        if (v2 > 0.9990) {
-            const double sc = 0.9995 / std::sqrt(v2);
-            vx *= sc; vy *= sc; vz *= sc;
-        }
-    };
-    clamp_v();
-
-    for (int it = 0; it < 8; ++it) {
-        double eps = T00 - (Sx * vx + Sy * vy + Sz * vz);
-        if (eps < 1.0e-12) eps = 1.0e-12;
-        const double a00 = eps + Txx, a01 = Txy,       a02 = Txz;
-        const double a11 = eps + Tyy, a12 = Tyz,       a22 = eps + Tzz;
-        const double c00 = a11 * a22 - a12 * a12;
-        const double c01 = -(a01 * a22 - a12 * a02);
-        const double c02 = a01 * a12 - a11 * a02;
-        const double c11 = a00 * a22 - a02 * a02;
-        const double c12 = -(a00 * a12 - a01 * a02);
-        const double c22 = a00 * a11 - a01 * a01;
-        const double det = a00 * c00 + a01 * c01 + a02 * c02;
-        if (std::fabs(det) <= 1.0e-30) break;
-        const double inv_det = 1.0 / det;
-        vx = (c00 * Sx + c01 * Sy + c02 * Sz) * inv_det;
-        vy = (c01 * Sx + c11 * Sy + c12 * Sz) * inv_det;
-        vz = (c02 * Sx + c12 * Sy + c22 * Sz) * inv_det;
-        clamp_v();
+    vx_e = JBx / JB0;
+    vy_e = JBy / JB0;
+    vz_e = JBz / JB0;
+    const double v2 = vx_e * vx_e + vy_e * vy_e + vz_e * vz_e;
+    if (v2 > 0.9990) {
+        const double sc = 0.9995 / std::sqrt(v2);
+        vx_e *= sc; vy_e *= sc; vz_e *= sc;
     }
-    eps_lrf = std::max(0.0, T00 - (Sx * vx + Sy * vy + Sz * vz));
-    // Exact Lorentz-scalar trace identity: g_munu T^munu = T00 - Tr(T_ij) == eps_LRF - 3 P_LRF
+    const double v2_clamped = vx_e * vx_e + vy_e * vy_e + vz_e * vz_e;
+    const double u0 = 1.0 / std::sqrt(1.0 - v2_clamped);
+    const double ux = u0 * vx_e, uy = u0 * vy_e, uz = u0 * vz_e;
+    nB_e = JB0 / u0;
+
+    // Exact covariant Eckart energy density eps_E = u_mu T_B^munu u_nu with u_mu = (u0, -ux, -uy, -uz)
+    eps_e = u0 * u0 * T00
+            - 2.0 * u0 * (ux * T0x + uy * T0y + uz * T0z)
+            + (ux * ux * Txx + uy * uy * Tyy + uz * uz * Tzz)
+            + 2.0 * (ux * uy * Txy + ux * uz * Txz + uy * uz * Tyz);
+    if (eps_e < 0.0) eps_e = 0.0;
+
     const double trace_gT = T00 - (Txx + Tyy + Tzz);
-    P_lrf = (eps_lrf - trace_gT) / 3.0;
+    P_e = (eps_e - trace_gT) / 3.0;
 }
 
 }  // namespace hcgf_detail
@@ -114,11 +106,13 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
     std::vector<double> tmp(nc, 0.0);
 
     for (const auto& hp : host_p) {
+        const SpeciesInfo sp = get_species_info(hp.species);
+        if (sp.baryon_num <= 0) continue;  // Coarse-grain ONLY baryons (exclude B=0 pions!)
+
         int i0, j0, k0;
         double fx, fy, fz;
         if (!mf_detail::cic_weights(hp.x, hp.y, hp.z, gcfg, i0, j0, k0, fx, fy, fz)) continue;
 
-        const SpeciesInfo sp = get_species_info(hp.species);
         const double B = static_cast<double>(sp.baryon_num);
         const double Q = static_cast<double>(sp.charge);
         double wp = 0.0, wn = 0.0;
@@ -184,17 +178,16 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
             Tyy += w_pot * uy * uy + p_pot; Tyz += w_pot * uy * uz;         Tzz += w_pot * uz * uz + p_pot;
         }
 
-        double eps_lrf = 0.0, P_lrf = 0.0, vx_L = 0.0, vy_L = 0.0, vz_L = 0.0;
-        hcgf_detail::solve_landau_frame(T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz,
-                                        eps_lrf, P_lrf, vx_L, vy_L, vz_L);
-        const double gam_L = 1.0 / std::sqrt(std::max(1.0e-8, 1.0 - (vx_L * vx_L + vy_L * vy_L + vz_L * vz_L)));
-        const double nb_lrf = std::max(0.0, gam_L * (jb0[c] - (jbx[c] * vx_L + jby[c] * vy_L + jbz[c] * vz_L)));
+        double nb_e = 0.0, eps_e = 0.0, P_e = 0.0, vx_e = 0.0, vy_e = 0.0, vz_e = 0.0;
+        hcgf_detail::eval_eckart_frame(jb0[c], jbx[c], jby[c], jbz[c],
+                                       T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz,
+                                       nb_e, eps_e, P_e, vx_e, vy_e, vz_e);
 
         const double vals[24] = {
             T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz,
             jb0[c], jbx[c], jby[c], jbz[c],
             jq0[c], jqx[c], jqy[c], jqz[c],
-            eps_lrf, P_lrf, nb_lrf, vx_L, vy_L, vz_L
+            eps_e, P_e, nb_e, vx_e, vy_e, vz_e
         };
         for (int f = 0; f < 24; ++f) snap.fields[f][c] = static_cast<float>(vals[f]);
     }

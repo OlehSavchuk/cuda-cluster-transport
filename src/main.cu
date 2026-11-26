@@ -284,7 +284,8 @@ void print_usage(const char* prog) {
         "  --dump-tmunu-every <int>           Steps between HCGF T^munu dumps (default: 5)\n"
         "  --cluster-mode <microscopic|none|freezeout>\n"
         "                                     Cluster treatment: dynamical, pure N+Delta+pi, or n<nfr thermal\n"
-        "  --nfr <float>                      Freeze-out proper baryon density n_fr [fm^-3] (default: 0.04)\n"
+        "  --backflow <remelt|outward|ghost>  Back-emitted freeze-out particle handling (default: remelt)\n"
+        "  --nfr <float>                      Freeze-out Eckart baryon density n_fr [fm^-3] (default: 0.04)\n"
         "  --freezeout-every <int>            Steps between n<nfr cell checks (default: 2)\n"
         "  --freezeout-tmin <float>           Min time before n<nfr check [fm/c] (<0: auto overlap time)\n"
         "  --freezeout-cells-csv <path>       Write HCGF n<nfr freeze-out hypersurface cells to CSV\n"
@@ -350,6 +351,7 @@ int main(int argc, char** argv) {
     std::string dump_tmunu_dir;
     int dump_tmunu_every = 5;
     std::string cluster_mode_str = "freezeout";
+    std::string backflow_str = "remelt";
     double nfr_fm3 = 0.040;
     int freezeout_every = 2;
     double freezeout_tmin = -1.0;
@@ -397,6 +399,8 @@ int main(int argc, char** argv) {
             dump_tmunu_every = std::stoi(next_str());
         } else if (arg == "--cluster-mode") {
             cluster_mode_str = next_str();
+        } else if (arg == "--backflow") {
+            backflow_str = next_str();
         } else if (arg == "--nfr") {
             nfr_fm3 = std::stod(next_str());
         } else if (arg == "--freezeout-every") {
@@ -599,6 +603,9 @@ int main(int argc, char** argv) {
 
     FreezeoutConfig fo_cfg{};
     fo_cfg.mode = cluster_mode;
+    if (backflow_str == "outward") fo_cfg.backflow = BackflowMode::OutwardOnly;
+    else if (backflow_str == "ghost") fo_cfg.backflow = BackflowMode::GhostFreeStream;
+    else fo_cfg.backflow = BackflowMode::RemeltInDense;
     fo_cfg.n_fr_fm3 = nfr_fm3;
     fo_cfg.cells_csv_path = freezeout_cells_csv;
     if (freezeout_tmin >= 0.0) {
@@ -760,9 +767,11 @@ int main(int argc, char** argv) {
                 obs0.n_active, obs_final.n_active);
     fo_clusterizer.write_freezeout_cells_csv();
     if (cluster_mode != ClusterMode::Microscopic) {
-        std::printf(" Freeze-Out Grid: %d cells crossed n_B < %.3f fm^-3 | %lld baryons -> %lld test clusters\n",
+        std::printf(" Freeze-Out Grid: %d cells (n_B < %.3f fm^-3) | %lld B -> %lld cl | back-inward: %lld (reabs N: %lld, remelt cl: %lld)\n",
                     fo_clusterizer.total_cells_frozen(), fo_cfg.n_fr_fm3,
-                    fo_clusterizer.total_baryons_converted(), fo_clusterizer.total_clusters_formed());
+                    fo_clusterizer.total_baryons_converted(), fo_clusterizer.total_clusters_formed(),
+                    fo_clusterizer.back_emitted_total(),
+                    fo_clusterizer.reabsorbed_nucleons(), fo_clusterizer.remelted_clusters());
     }
     std::printf(" Wall Time      : %.3f s (%.2f ms/step)\n",
                 elapsed_s, 1000.0 * elapsed_s / (n_steps > 0 ? n_steps : 1));

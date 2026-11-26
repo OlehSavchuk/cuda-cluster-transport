@@ -917,31 +917,41 @@ void test_hcgf_tmunu_and_landau_frame() {
     mix.include_ground_clusters = false;
     mix.include_excited_dstar = false;
     mix.include_excited_he4 = false;
-    mix.include_pions = true;
+    mix.include_pions = false;
     mix.include_deltas = true;
 
     const int n_test = 20;
-    auto host_p = init_box_ensemble(12000, gcfg, 0.080, 0.080, 0.780, -0.010, mix, 6161ULL);
+    auto host_p = init_box_ensemble(12000, gcfg, 0.060, 0.060, 0.780, -0.010, mix, 6161ULL);
     const double bx = 0.28, by = -0.18, bz = 0.42;
     const double bmag = std::sqrt(bx * bx + by * by + bz * bz);
     const double gam = 1.0 / std::sqrt(1.0 - bmag * bmag);
-    double E_sum = 0.0, Pz_sum = 0.0, B_sum = 0.0, Q_sum = 0.0;
+    double E_baryon = 0.0, Pz_baryon = 0.0, B_sum = 0.0, Q_baryon = 0.0;
     for (std::size_t idx = 0; idx < host_p.size(); ++idx) {
         auto& hp = host_p[idx];
         PhiloxRng jr(9090ULL, 1ULL, idx);
-        // Sample equal-lab-time relativistic Juttner distribution dN ~ (u_mu p^mu / u^0) exp(-u.p/T) d^3p/E
         FourVector p_cm{};
         while (true) {
-            p_cm = sample_maxwell_juttner(hp.mass, 0.080, jr);
+            p_cm = sample_maxwell_juttner(hp.mass, 0.060, jr);
             const double b_dot_v = (bx * p_cm.x + by * p_cm.y + bz * p_cm.z) / p_cm.t;
             if (jr.uniform() * (1.0 + bmag) <= (1.0 + b_dot_v)) break;
         }
         const FourVector plab = lorentz_boost_from_cm(hp.mass, p_cm.t, p_cm.x, p_cm.y, p_cm.z, bx, by, bz, gam);
         hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
         const SpeciesInfo sp = get_species_info(hp.species);
-        E_sum += hp.E / n_test; Pz_sum += hp.pz / n_test;
+        E_baryon += hp.E / n_test; Pz_baryon += hp.pz / n_test;
         B_sum += static_cast<double>(sp.baryon_num) / n_test;
-        Q_sum += static_cast<double>(sp.charge) / n_test;
+        Q_baryon += static_cast<double>(sp.charge) / n_test;
+    }
+
+    // Inject 4,000 hard counter-streaming pions (B=0) moving OPPOSITE to baryons to verify pions are excluded!
+    for (int k = 0; k < 4000; ++k) {
+        HostParticle pi{};
+        pi.x = 8.0; pi.y = 8.0; pi.z = 8.0;
+        pi.species = (k % 2 == 0) ? PION_MINUS : PION_PLUS;
+        pi.mass = get_species_info(pi.species).pole_mass_gev;
+        pi.px = -0.75; pi.py = 0.55; pi.pz = -1.10;
+        pi.E = std::sqrt(pi.mass * pi.mass + pi.px * pi.px + pi.py * pi.py + pi.pz * pi.pz);
+        host_p.push_back(pi);
     }
 
     const MeanFieldConfig mf_off = make_mean_field_config(EOSPreset::None);
@@ -963,14 +973,14 @@ void test_hcgf_tmunu_and_landau_frame() {
         iJB0 += snap.fields[10][c] * dV; iJQ0 += snap.fields[14][c] * dV;
         vx_avg += snap.fields[21][c] / nc; vy_avg += snap.fields[22][c] / nc; vz_avg += snap.fields[23][c] / nc;
     }
-    TEST_ASSERT(std::fabs(iT00 - E_sum) / E_sum < 1.0e-3 && std::fabs(iT0z - Pz_sum) / Pz_sum < 1.0e-3,
-                "Integrated T^00 or T^0z mismatch vs exact particle 4-momentum");
-    TEST_ASSERT(std::fabs(iJB0 - B_sum) / B_sum < 1.0e-3 && std::fabs(iJQ0 - Q_sum) < 5.0e-2,
-                "Integrated J_B^0 or J_Q^0 mismatch");
-    TEST_ASSERT(std::fabs(vx_avg - bx) < 0.015 && std::fabs(vy_avg - by) < 0.015 && std::fabs(vz_avg - bz) < 0.015,
-                "Landau 4-velocity solver failed to recover relativistic frame boost");
-    std::printf("[PASS] test_hcgf_tmunu_and_landau_frame (int T00=%.2f/%.2f GeV, v_L=(%.3f,%.3f,%.3f) vs (%.2f,%.2f,%.2f))\n",
-                iT00, E_sum, vx_avg, vy_avg, vz_avg, bx, by, bz);
+    TEST_ASSERT(std::fabs(iT00 - E_baryon) / E_baryon < 1.0e-3 && std::fabs(iT0z - Pz_baryon) / Pz_baryon < 1.0e-3,
+                "Baryon-only T^00 or T^0z leaked pion contributions");
+    TEST_ASSERT(std::fabs(iJB0 - B_sum) / B_sum < 1.0e-3 && std::fabs(iJQ0 - Q_baryon) < 5.0e-2,
+                "Integrated J_B^0 or baryonic J_Q^0 mismatch");
+    TEST_ASSERT(std::fabs(vx_avg - bx) < 0.008 && std::fabs(vy_avg - by) < 0.008 && std::fabs(vz_avg - bz) < 0.008,
+                "Eckart 4-velocity failed to recover baryon collective boost");
+    std::printf("[PASS] test_hcgf_baryon_eckart_frame (int T00_B=%.2f/%.2f GeV [pions excluded], v_E=(%.3f,%.3f,%.3f))\n",
+                iT00, E_baryon, vx_avg, vy_avg, vz_avg);
 }
 
 void test_pure_hadron_and_grid_freezeout_clusters() {
@@ -1026,7 +1036,44 @@ void test_pure_hadron_and_grid_freezeout_clusters() {
     TEST_ASSERT(d_none == 0 && a_none == 0, "Expected ZERO nuclear clusters in pure N+Delta+pi mode");
     TEST_ASSERT(d_fo > 150 && a_fo > 30, "Expected abundant thermal d, t, 3He, 4He from n < n_fr freeze-out cells");
     TEST_ASSERT(dE_fo < 1.0e-11 && dP_fo < 1.0e-10, "4-momentum violated in n < n_fr cell thermal clusterization");
-    std::printf("[PASS] test_pure_hadron_and_grid_freezeout_clusters (pure N+Delta+pi: cl=0 | n<n_fr thermal: d=%d, A3+4=%d, |dE|/E=%.2e, |dP|=%.2e)\n",
+
+    // Explicitly inject back-emitted freeze-out deuterons & alphas into a dense core (n_B > n_melt)
+    // and verify Mott re-melting back into un-frozen p + n with exact E, P, B, Q conservation!
+    GridConfig box_g{};
+    box_g.boundary = BoundaryMode::PeriodicBox;
+    box_g.nx = 4; box_g.ny = 4; box_g.nz = 4;
+    box_g.xmin = 0.0; box_g.xmax = 8.0;
+    box_g.ymin = 0.0; box_g.ymax = 8.0;
+    box_g.zmin = 0.0; box_g.lz(); box_g.zmax = 8.0;
+    MixtureConfig m_nuc{};
+    m_nuc.include_ground_clusters = false; m_nuc.include_excited_dstar = false; m_nuc.include_excited_he4 = false;
+    auto dense_p = init_box_ensemble(800, box_g, 0.035, 0.035, 0.880, 0.0, m_nuc, 1234ULL);
+    for (int k = 0; k < 25; ++k) {
+        HostParticle cl{};
+        cl.x = 1.0 + 6.0 * ((k * 7) % 25) / 25.0;
+        cl.y = 1.0 + 6.0 * ((k * 11) % 25) / 25.0;
+        cl.z = 1.0 + 6.0 * ((k * 13) % 25) / 25.0;
+        cl.species = (k % 2 == 0) ? DEUTERON : ALPHA;
+        cl.mass = get_species_info(cl.species).pole_mass_gev;
+        cl.px = -0.55; cl.py = 0.25; cl.pz = -0.45;
+        cl.E = std::sqrt(cl.mass * cl.mass + cl.px * cl.px + cl.py * cl.py + cl.pz * cl.pz);
+        cl.freezeout_tag = 1;
+        dense_p.push_back(cl);
+    }
+    ParticleSystem ps_m; ps_m.upload(dense_p);
+    ObservableCalculator oc_m;
+    const GlobalObservables om0 = oc_m.compute(ps_m);
+    FreezeoutConfig fcm{}; fcm.mode = ClusterMode::FreezeoutThermal; fcm.n_fr_fm3 = 0.040; fcm.min_time_fm = 0.0;
+    FreezeoutCellClusterizer foc_m(fcm, box_g);
+    foc_m.process_step(ps_m, 1, 1.0, /*n_test=*/15, make_mean_field_config(EOSPreset::None), 99ULL, false);
+    const GlobalObservables om1 = oc_m.compute(ps_m);
+    TEST_ASSERT(foc_m.remelted_clusters() == 25 && om1.counts[DEUTERON] == 0 && om1.counts[ALPHA] == 0,
+                "Back-emitted clusters failed to Mott-dissociate inside dense core n_B > n_melt");
+    TEST_ASSERT(om1.baryon_tot == om0.baryon_tot && om1.charge_tot == om0.charge_tot &&
+                std::fabs(om1.E_tot - om0.E_tot) / om0.E_tot < 1.0e-13,
+                "Conservation violated during back-emitted cluster Mott re-melting");
+
+    std::printf("[PASS] test_eckart_freezeout_and_remelt (d=%d, A3+4=%d, remelt=25/25, |dE|/E=%.2e, |dP|=%.2e)\n",
                 d_fo, a_fo, dE_fo, dP_fo);
 }
 

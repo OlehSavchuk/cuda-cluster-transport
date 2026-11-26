@@ -41,7 +41,8 @@ def read_hcgf_tmunu_file(path):
     }
 
 
-def run_sim(tag, b_fm, ntest, cluster_mode, nfr=0.040, dump_tmunu=False, fo_csv=False, seed=4200):
+def run_sim(tag, b_fm, ntest, cluster_mode, nfr=0.040, backflow="remelt",
+            dump_tmunu=False, fo_csv=False, force_rerun=False, seed=4200):
     os.makedirs(OUT_DIR, exist_ok=True)
     fl_csv = os.path.join(OUT_DIR, f"{tag}_flow.csv")
     ts_csv = os.path.join(OUT_DIR, f"{tag}_ts.csv")
@@ -50,7 +51,8 @@ def run_sim(tag, b_fm, ntest, cluster_mode, nfr=0.040, dump_tmunu=False, fo_csv=
         "--elab-amev", "250.0", "--impact-b", f"{b_fm:.2f}",
         "--ntest", str(ntest), "--steps", "220", "--dt", "0.30", "--substeps", "2",
         "--box", "48.0", "--grid", "24", "--eos", "md-soft", "--in-medium-ec", "on",
-        "--cluster-mode", cluster_mode, "--nfr", f"{nfr:.4f}", "--freezeout-every", "2",
+        "--cluster-mode", cluster_mode, "--backflow", backflow,
+        "--nfr", f"{nfr:.4f}", "--freezeout-every", "2",
         "--seed", str(seed), "--csv", ts_csv, "--flow-csv", fl_csv,
     ]
     tmunu_dir = os.path.join(OUT_DIR, f"{tag}_tmunu")
@@ -59,9 +61,12 @@ def run_sim(tag, b_fm, ntest, cluster_mode, nfr=0.040, dump_tmunu=False, fo_csv=
         cmd += ["--dump-tmunu-dir", tmunu_dir, "--dump-tmunu-every", "10"]
     if fo_csv:
         cmd += ["--freezeout-cells-csv", cells_csv]
-    if not os.path.exists(fl_csv + ".yields.csv"):
-        print(f"Running {tag} (mode={cluster_mode}, b={b_fm}, nfr={nfr}, N_test={ntest})...", flush=True)
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+    if force_rerun or not os.path.exists(fl_csv + ".yields.csv"):
+        print(f"Running {tag} (mode={cluster_mode}, backflow={backflow}, b={b_fm}, nfr={nfr})...", flush=True)
+        res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        for line in res.stdout.splitlines():
+            if "Freeze-Out Grid:" in line:
+                print(" ", line, flush=True)
 
     yields = {}
     with open(fl_csv + ".yields.csv", "r") as f:
@@ -95,17 +100,24 @@ def load_flow_ut0(ut_csv, sp):
 
 
 def run_all_benchmarks():
-    # 1. Central Au+Au @ 250 AMeV (b = 1.4 fm, FOPI b0 < 0.15) for cluster yield benchmark
+    # 1. Central Au+Au @ 250 AMeV (b = 1.4 fm, FOPI b0 < 0.15): Eckart E-P.u + backflow remelt
     cen_mic = run_sim("cen_micro", 1.4, 300, "microscopic", seed=7101)
-    cen_fo3 = run_sim("cen_nfr053", 1.4, 300, "freezeout", nfr=0.0533, seed=7101)
-    cen_fo4 = run_sim("cen_nfr040", 1.4, 300, "freezeout", nfr=0.0400, seed=7101)
-    cen_fo6 = run_sim("cen_nfr027", 1.4, 300, "freezeout", nfr=0.0267, seed=7101)
+    cen_fo3 = run_sim("cen_eck_nfr053", 1.4, 300, "freezeout", nfr=0.0533, force_rerun=True, seed=7101)
+    cen_fo4 = run_sim("cen_eck_nfr040", 1.4, 300, "freezeout", nfr=0.0400, force_rerun=True, seed=7101)
+    cen_fo6 = run_sim("cen_eck_nfr027", 1.4, 300, "freezeout", nfr=0.0267, force_rerun=True, seed=7101)
 
     # 2. Semicentral Au+Au @ 250 AMeV (b = 4.8 fm, FOPI 0.25 < b0 < 0.45):
-    #    Compare Microscopic vs Freeze-Out (n_fr = rho_0/4 = 0.040 fm^-3) + export HCGF T^munu & cells!
+    #    Compare Microscopic vs Eckart Freeze-Out (remelt vs outward vs ghost) + export HCGF T_B^munu!
     sem_mic = run_sim("sem_micro", 4.8, 500, "microscopic", seed=8202)
-    sem_fo4 = run_sim("sem_nfr040", 4.8, 500, "freezeout", nfr=0.0400,
-                      dump_tmunu=True, fo_csv=True, seed=8202)
+    sem_fo4 = run_sim("sem_eck_remelt", 4.8, 500, "freezeout", nfr=0.0400, backflow="remelt",
+                      dump_tmunu=True, fo_csv=True, force_rerun=True, seed=8202)
+    sem_out = run_sim("sem_eck_outward", 4.8, 500, "freezeout", nfr=0.0400, backflow="outward",
+                      force_rerun=True, seed=8202)
+    sem_gho = run_sim("sem_eck_ghost", 4.8, 500, "freezeout", nfr=0.0400, backflow="ghost",
+                      force_rerun=True, seed=8202)
+    for lbl, r in [("Backflow=remelt", sem_fo4), ("Backflow=outward", sem_out), ("Backflow=ghost", sem_gho)]:
+        y = r["yields"]
+        print(f"  [Semicentral {lbl:17s}] p={y['p']:6.2f}, d={y['d']:5.2f}, t={y['t']:5.2f}, 3He={y['3He']:5.2f}, 4He={y['4He']:4.2f}")
     return cen_mic, cen_fo3, cen_fo4, cen_fo6, sem_mic, sem_fo4
 
 
@@ -121,8 +133,8 @@ def plot_all():
     })
     fig, axes = plt.subplots(2, 3, figsize=(16.5, 9.8), dpi=180)
     fig.suptitle(
-        "Microscopic Dynamical Clusters vs. Pure $N+\\Delta+\\pi$ + HCGF $T^{\\mu\\nu}$ Grid Freeze-Out ($n_B < n_{\\mathrm{fr}}$) — FOPI Au+Au @ 250 $A$ MeV",
-        fontsize=12.6, fontweight="bold", y=0.98
+        "Microscopic Dynamical Clusters vs. Baryon-Only Eckart-Frame ($u^0 E - \\vec{P}\\cdot\\vec{u}$) HCGF Freeze-Out ($n_B < n_{\\mathrm{fr}}$) — FOPI Au+Au @ 250 $A$ MeV",
+        fontsize=12.3, fontweight="bold", y=0.98
     )
 
     # (a) HCGF T^munu reaction-plane slice (y ~ 0, t = 27 fm/c): thermal energy density & Landau flow
@@ -149,12 +161,12 @@ def plot_all():
               vz_l.T[::st, ::st][mask_q], vx_l.T[::st, ::st][mask_q],
               color="white", alpha=0.80, scale=2.6, width=0.004)
     cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-    cb.set_label("$\\varepsilon_{\\mathrm{LRF}} - m_N n_B$ [$\\mathrm{MeV/fm^3}$]")
+    cb.set_label("$\\varepsilon_{\\mathrm{Eckart}} - m_N n_B$ [$\\mathrm{MeV/fm^3}$]")
     ax.set_xlim(-18, 18); ax.set_ylim(-16, 16)
     ax.set_xlabel("Beam Axis $z$ [fm]"); ax.set_ylabel("Reaction Plane $x$ [fm]")
-    ax.set_title(f"(a) HCGF $T^{{\\mu\\nu}}$ Slice ($t={tm_snap['t_fm']:.0f}$ fm/$c$; cyan: $n_{{\\mathrm{{fr}}}}$)")
+    ax.set_title(f"(a) Eckart $T_B^{{\\mu\\nu}}$ Slice ($t={tm_snap['t_fm']:.0f}$ fm/$c$; cyan: $n_{{\\mathrm{{fr}}}}$)")
 
-    # (b) Freeze-out hypersurface cells (T vs n_B and T vs mu_B) recorded at n_B < n_fr
+    # (b) Freeze-out hypersurface cells (T vs mu_B) from Eckart E_rest = u^0 E - P.u
     ax = axes[0, 1]
     fo_T, fo_muB, fo_t, fo_b = [], [], [], []
     with open(sem_fo4["cells"], "r") as f:
@@ -169,9 +181,9 @@ def plot_all():
     cb2 = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.03)
     cb2.set_label("Freeze-Out Time $t_{\\mathrm{fr}}$ [fm/$c$]")
     ax.set_xlabel("Cell Baryon Chemical Potential $\\mu_B$ [MeV]")
-    ax.set_ylabel("Cell Freeze-Out Temperature $T_{\\mathrm{fr}}$ [MeV]")
+    ax.set_ylabel("Eckart Cell Temperature $T_{\\mathrm{fr}}$ [MeV]")
     ax.grid(alpha=0.25)
-    ax.set_title("(b) HCGF $n_B < n_{\\mathrm{fr}}$ Freeze-Out Hypersurface $(T, \\mu_B)$")
+    ax.set_title("(b) Eckart $u^0 E - \\vec{P}\\cdot\\vec{u}$ Freeze-Out Cells $(T, \\mu_B)$")
 
     # (c) Central Au+Au (b0 < 0.15) cluster yields: Microscopic vs Thermal n_fr scan vs FOPI
     ax = axes[0, 2]
