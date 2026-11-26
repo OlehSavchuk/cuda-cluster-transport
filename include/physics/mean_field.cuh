@@ -275,7 +275,7 @@ HD_INLINE void sample_cic_grad(const Real* field, double x, double y, double z,
 
 HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
                                            double norm_inv_n_dV, MeanFieldView& mf) {
-    if (!p.active[i]) return;
+    if (!p.active[i] || p.freezeout_tag[i] != 0) return;
     int i0, j0, k0;
     double fx, fy, fz;
     if (!cic_weights(p.x[i], p.y[i], p.z[i], mf.gcfg, i0, j0, k0, fx, fy, fz)) return;
@@ -348,7 +348,7 @@ HD_INLINE void sample_cic_flow_and_u(const MeanFieldView& mf,
 
 HD_INLINE void deposit_particle_md_psi_cic(const ParticleSoAView& p, int i,
                                            double norm_inv_n_dV_rho0, MeanFieldView& mf) {
-    if (!p.active[i]) return;
+    if (!p.active[i] || p.freezeout_tag[i] != 0) return;
     int i0, j0, k0;
     double fx, fy, fz;
     if (!cic_weights(p.x[i], p.y[i], p.z[i], mf.gcfg, i0, j0, k0, fx, fy, fz)) return;
@@ -432,7 +432,7 @@ HD_INLINE void eval_node_potentials(MeanFieldView& mf, int c) {
 // Symplectic momentum kick dp/dt = -grad_r U_cluster(A, Z, r, p) over interval dt
 HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
                                     const MeanFieldView& mf, double* cm_accum) {
-    if (!p.active[i]) return;
+    if (!p.active[i] || p.freezeout_tag[i] != 0) return;
     const double x = p.x[i], y = p.y[i], z = p.z[i];
     const SpeciesInfo sp = get_species_info(p.species[i]);
     if (sp.baryon_num == 0) return;
@@ -505,7 +505,7 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
 // Subtract spurious discrete-lattice net impulse per baryon so total 3-momentum is exact to ~1e-14
 HD_INLINE void remove_lattice_cm_impulse(ParticleSoAView& p, int i,
                                          double corr_x, double corr_y, double corr_z) {
-    if (!p.active[i]) return;
+    if (!p.active[i] || p.freezeout_tag[i] != 0) return;
     const int bnum = get_species_info(p.species[i]).baryon_num;
     if (bnum == 0) return;
     const double A = static_cast<double>(bnum);
@@ -525,7 +525,7 @@ HD_INLINE void drift_particle_vlasov(ParticleSoAView& p, int i, double dt, const
     double vz = p.pz[i] * inv_E;
 
     const int bnum = get_species_info(p.species[i]).baryon_num;
-    if (bnum > 0 && mf.cfg.enabled && ::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
+    if (bnum > 0 && p.freezeout_tag[i] == 0 && mf.cfg.enabled && ::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
         double u_loc, pfx, pfy, pfz;
         sample_cic_flow_and_u(mf, p.x[i], p.y[i], p.z[i], u_loc, pfx, pfy, pfz);
         const double A = static_cast<double>(bnum);

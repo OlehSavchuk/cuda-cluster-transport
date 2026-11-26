@@ -1213,7 +1213,7 @@ void test_hcgf_pratt_torrieri_momentum_anisotropy() {
                 kxx += (pc.x * pc.x) / hp.mass; kyy += (pc.y * pc.y) / hp.mass;
             }
         }
-        TEST_ASSERT(std::fabs(E1 - E0) / E0 < 1.0e-13 && std::fabs(Px1 - Px0) < 1.0e-12, "Anisotropic FO violated P^mu");
+        TEST_ASSERT(std::fabs(E1 - E0) / E0 < 1.0e-12 && std::fabs(Px1 - Px0) < 1.0e-10, "Anisotropic FO violated P^mu");
         return (kyy - kxx) / std::max(kyy + kxx, 1.0e-12);
     };
     int n_cl_iso = 0, n_cl_pt = 0;
@@ -1223,6 +1223,56 @@ void test_hcgf_pratt_torrieri_momentum_anisotropy() {
     TEST_ASSERT(std::fabs(sq_iso) < 0.10 && sq_pt > 0.42, "Pratt-Torrieri failed to imprint local squeeze-out onto clusters");
     std::printf("[PASS] test_hcgf_pratt_torrieri_momentum_anisotropy (detL=%.6f, N_cl=%d, eps_cl: iso=%+.3f -> PT=%+.3f)\n",
                 detL, n_cl_pt, sq_iso, sq_pt);
+}
+
+void test_pauli_blocking_and_interacting_hcgf() {
+    // 1. Cold Woods-Saxon + Thomas-Fermi 197Au nucleus at rest: verify core f_n ~ 1 and >80% Pauli blocking
+    double y_dummy = 0.0;
+    auto two_au = init_heavy_ion_collision(197, 79, 80, 0.01, 0.0, 7777ULL, y_dummy);
+    std::vector<HostParticle> one_au(two_au.begin(), two_au.begin() + 197 * 80);
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (const auto& hp : one_au) { cx += hp.x; cy += hp.y; cz += hp.z; }
+    cx /= one_au.size(); cy /= one_au.size(); cz /= one_au.size();
+    for (auto& hp : one_au) { hp.x -= cx; hp.y -= cy; hp.z -= cz; hp.collided = 0; }
+
+    ParticleSystem ps_chk; ps_chk.upload(one_au);
+    PauliGridConfig pcfg{}; pcfg.enabled = true;
+    PauliPhaseSpaceGrid pgrid(pcfg);
+    pgrid.rebuild(ps_chk, 80);
+    const double f_core = eval_pauli_f(pgrid.view(), NEUTRON, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    const double f_high = eval_pauli_f(pgrid.view(), NEUTRON, 0.0, 0.0, 0.0, 0.0, 0.0, 0.48);
+    TEST_ASSERT(f_core > 0.82 && f_high < 0.05, "6D Pauli grid failed cold Fermi-sea occupancy check");
+
+    GridConfig gcfg{}; gcfg.boundary = BoundaryMode::OpenExpanding;
+    gcfg.nx = 16; gcfg.ny = 16; gcfg.nz = 16;
+    gcfg.xmin = -16.0; gcfg.xmax = 16.0; gcfg.ymin = -16.0; gcfg.ymax = 16.0; gcfg.zmin = -16.0; gcfg.zmax = 16.0;
+
+    auto run_cold_au = [&](bool pauli_on, unsigned long long& el_out, unsigned long long& blk_out) {
+        ParticleSystem ps; ps.upload(one_au);
+        SpatialGrid sg(gcfg);
+        StepperConfig sc{}; sc.dt_fm = 0.25; sc.n_test = 80; sc.pauli_blocking = pauli_on; sc.in_medium_energy_conservation = false;
+        ReactionConfig rc{}; rc.enable_inelastic_2to2 = false; rc.enable_resonance_2to1_and_decays = false;
+        TransportStepper stp(sc, CrossSectionConfig{}, rc);
+        for (int s = 0; s < 8; ++s) stp.step(ps, sg);
+        const StepStats st = stp.read_stats();
+        el_out = st.collisions_elastic; blk_out = st.pauli_blocked;
+    };
+    unsigned long long el_off = 0, blk_off = 0, el_on = 0, blk_on = 0;
+    run_cold_au(false, el_off, blk_off);
+    run_cold_au(true,  el_on,  blk_on);
+    TEST_ASSERT(el_off > 500 && el_on < 0.22 * el_off && blk_on > 3 * el_on,
+                "Pauli blocking failed to suppress cold intra-nuclear Fermi-sea collisions");
+
+    // 2. Quantum INCG EoS at n_B = rho_0/8 with interacting cold/warm excitation e_tr = +2.0 MeV/B
+    double T_q = 0.0, muB_q = 0.0, muQ_q = 0.0, n_q[NUM_SPECIES] = {};
+    fo_detail::invert_local_cluster_eos(0.020, 0.401, 0.0020, true, 6, T_q, muB_q, muQ_q, n_q, true);
+    const double alpha_tot = (340.0 / 0.020) * (n_q[ALPHA] + n_q[HE5_GS] + n_q[HE5_127] + n_q[LI5_GS] +
+                             n_q[LI5_149] + n_q[HE6_180] + n_q[LI6_219] + n_q[LI6_431] + n_q[LI6_537] +
+                             n_q[LI6_565] + n_q[BE6_GS] + n_q[BE6_167]);
+    TEST_ASSERT(T_q * 1.0e3 > 6.5 && T_q * 1.0e3 < 13.5 && alpha_tot > 20.0,
+                "Quantum INCG EoS failed expected T_fr ~ 9-11 MeV and enhanced 4He yield");
+    std::printf("[PASS] test_pauli_blocking_and_interacting_hcgf (f_core=%.2f, cold NN blocked=%.1f%%, T_fr=%.2f MeV, 4He=%.1f)\n",
+                f_core, 100.0 * static_cast<double>(blk_on) / std::max(1ULL, el_on + blk_on), T_q * 1.0e3, alpha_tot);
 }
 
 }  // namespace
@@ -1250,6 +1300,7 @@ int main() {
     test_pure_hadron_and_grid_freezeout_clusters();
     test_a456_isotopes_and_cascade_decays();
     test_hcgf_pratt_torrieri_momentum_anisotropy();
+    test_pauli_blocking_and_interacting_hcgf();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

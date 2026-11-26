@@ -548,6 +548,7 @@ inline std::vector<HostParticle> init_heavy_ion_collision(int A_nuc,
             const FourVector plab = lorentz_boost_from_cm(hp.mass, E0, px0, py0, pz0, 0.0, 0.0, bz, gamma_cm);
             hp.t = 0.0;
             hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
+            hp.collided = (side == 0) ? -1 : -2;  // Cold ground-state nucleus tag (UrQMD spectator stability)
             out.push_back(hp);
         }
     }

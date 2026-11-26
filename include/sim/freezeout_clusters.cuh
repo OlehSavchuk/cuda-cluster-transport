@@ -38,6 +38,9 @@ struct FreezeoutConfig {
     double n_fr_fm3 = 0.040;          // Freeze-out Eckart baryon density threshold (~rho_0 / 4) [fm^-3]
     double melt_factor = 1.15;        // Hysteresis ratio n_melt / n_fr for re-entering dense matter
     double min_time_fm = 0.0;         // Minimum time before expansion freeze-out check activates [fm/c]
+    double peak_track_time_fm = 0.0;  // Time from which compressed peak_nb >= n_fr is tracked [fm/c]
+    bool require_peak_crossing = true;// Require cell to have compressed >= n_fr and cross downward (dn_B/dt <= 0)
+    bool quantum_statistics = true;   // Include Fermi-Dirac (fermions) & Bose-Einstein (bosons) in INCG EoS
     int max_cluster_A = 6;            // Max nuclear mass number A included in EoS & sampling (up to 6!)
     bool include_excited_clusters = true;  // Include d* and A=4,5,6 statistical resonances (feed-down!)
     bool local_anisotropy = true;     // Pratt-Torrieri p*_i = Lambda_ij q_j (det Lambda = 1) matching P*_ij!
@@ -64,18 +67,38 @@ struct FreezeoutCellRecord {
 
 namespace fo_detail {
 
-// Relativistic Maxwell-Juttner phase-space prefactor phi_a(T) [fm^-3] and mean excitation
-// energy <E_a(p) - Z m_p - N m_n>(T) [GeV] so n_a = phi_a(T) * exp(Z * u_p + N * u_n)
-inline void species_thermal_moments(int sp_id, double T_gev, double& phi_fm3, double& e_rel_gev) {
+// Exact 28-point Fermi-Dirac moments for nucleons (p, n) valid from T = 1.5 MeV degenerate sea to Boltzmann
+inline void nucleon_fermi_dirac_moments(double m, int g, double T_gev, double u_chem,
+                                        double& n_fm3, double& dn_du, double& e_kin_gev_fm3) {
+    using namespace phys;
+    constexpr int N_Q = 28;
+    const double s_max = std::sqrt(std::max(18.0, u_chem + 16.0));
+    const double ds = s_max / N_Q;
+    const double pref = (static_cast<double>(g) * T_gev) / (2.0 * PI * PI * HBARC * HBARC * HBARC);
+    n_fm3 = 0.0; dn_du = 0.0; e_kin_gev_fm3 = 0.0;
+    for (int j = 0; j < N_Q; ++j) {
+        const double s = (j + 0.5) * ds;
+        const double u = s * s;
+        const double K = T_gev * u;
+        const double E = m + K;
+        const double p = std::sqrt(K * (K + 2.0 * m));
+        const double arg = std::clamp(u - u_chem, -80.0, 80.0);
+        const double f = 1.0 / (std::exp(arg) + 1.0);
+        const double w = pref * (2.0 * s * ds) * p * E;
+        n_fm3 += w * f;
+        dn_du += w * f * (1.0 - f);
+        e_kin_gev_fm3 += w * f * K;
+    }
+}
+
+// Pure thermal Maxwell-Juttner base density phi_0(T) [fm^-3] (WITHOUT exp(-bind_shift/T)) and <K>(T) [GeV]
+inline void species_thermal_base(int sp_id, double T_gev, double& phi0_fm3, double& k_mean_gev, double& bind_shift_gev) {
     using namespace phys;
     const SpeciesInfo sp = get_species_info(sp_id);
     const double m = sp.pole_mass_gev;
-    const double bind_shift = m - (sp.charge * MASS_PROTON + (sp.baryon_num - sp.charge) * MASS_NEUTRON);
-    if ( -bind_shift / T_gev > 120.0 ) {
-        phi_fm3 = 0.0; e_rel_gev = bind_shift; return;
-    }
-    constexpr int N_Q = 48;
-    constexpr double S_MAX = 6.5;
+    bind_shift_gev = m - (sp.charge * MASS_PROTON + (sp.baryon_num - sp.charge) * MASS_NEUTRON);
+    constexpr int N_Q = 40;
+    constexpr double S_MAX = 6.2;
     const double ds = S_MAX / N_Q;
     double i_n = 0.0, i_k = 0.0;
     for (int j = 0; j < N_Q; ++j) {
@@ -89,51 +112,81 @@ inline void species_thermal_moments(int sp_id, double T_gev, double& phi_fm3, do
         i_k += w * K;
     }
     const double pref = static_cast<double>(sp.degeneracy) / (2.0 * PI * PI * HBARC * HBARC * HBARC);
-    phi_fm3 = pref * T_gev * i_n * std::exp(-bind_shift / T_gev);
-    e_rel_gev = bind_shift + ((i_n > 0.0) ? (i_k / i_n) : (1.5 * T_gev));
+    phi0_fm3 = pref * T_gev * i_n;
+    k_mean_gev = (i_n > 0.0) ? (i_k / i_n) : (1.5 * T_gev);
 }
 
-// Given (T_gev, nB_fm3, Yp), solve exact 2x2 SPD Newton system for (u_p, u_n) = ((mu_p-m_p)/T, (mu_n-m_n)/T)
-// and return equilibrium densities n_sp[NUM_SPECIES] + energy per baryon e_per_baryon_gev.
+// Given (T_gev, nB_fm3, Yp), solve 2x2 SPD Newton system for (u_p, u_n) = ((mu_p-m_p)/T, (mu_n-m_n)/T)
+// with Fermi-Dirac (fermions) & Bose-Einstein (bosons) quantum statistics in the INCG EoS!
 inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool inc_exc, int max_A,
-                                   double n_out[NUM_SPECIES], double& out_up, double& out_un) {
+                                   double n_out[NUM_SPECIES], double& out_up, double& out_un,
+                                   bool quantum_stats = true) {
     const double np_tgt = std::max(1.0e-9, Yp * nB_fm3);
     const double nn_tgt = std::max(1.0e-9, (1.0 - Yp) * nB_fm3);
 
-    double phi[NUM_SPECIES] = {}, erel[NUM_SPECIES] = {};
+    double phi0[NUM_SPECIES] = {}, kmean[NUM_SPECIES] = {}, bshift[NUM_SPECIES] = {};
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
         if (is_pion(id) || is_delta(id) || sp.baryon_num > max_A) continue;
         if (sp.is_excited && !inc_exc) continue;
-        species_thermal_moments(id, T_gev, phi[id], erel[id]);
+        species_thermal_base(id, T_gev, phi0[id], kmean[id], bshift[id]);
     }
 
-    double up = std::log(np_tgt / std::max(phi[PROTON], 1.0e-30));
-    double un = std::log(nn_tgt / std::max(phi[NEUTRON], 1.0e-30));
-    for (int it = 0; it < 16; ++it) {
-        double fp = -np_tgt, fn = -nn_tgt, jpp = 0.0, jpn = 0.0, jnn = 0.0;
+    double up = std::log(np_tgt / std::max(phi0[PROTON], 1.0e-30));
+    double un = std::log(nn_tgt / std::max(phi0[NEUTRON], 1.0e-30));
+    const int n_qterms = quantum_stats ? 6 : 1;
+
+    auto eval_species = [&](int id, double u_p, double u_n, double& na, double& dna_deta, double& e_tot_a) {
+        const SpeciesInfo sp = get_species_info(id);
+        if (quantum_stats && (id == PROTON || id == NEUTRON)) {
+            double ek = 0.0;
+            nucleon_fermi_dirac_moments(sp.pole_mass_gev, sp.degeneracy, T_gev,
+                                        (id == PROTON) ? u_p : u_n, na, dna_deta, ek);
+            e_tot_a = ek;
+            return;
+        }
+        const double Z = sp.charge, N = sp.baryon_num - sp.charge;
+        const bool is_boson = (sp.baryon_num % 2 == 0);
+        double eta = Z * u_p + N * u_n - bshift[id] / T_gev;
+        eta = std::clamp(eta, -200.0, is_boson ? -0.012 : 60.0);
+        double s_n = 0.0, s_dn = 0.0, s_k = 0.0;
+        for (int q = 1; q <= n_qterms; ++q) {
+            const double sgn = (!is_boson && (q % 2 == 0)) ? -1.0 : 1.0;
+            const double ez = sgn * std::exp(q * eta);
+            const double q_half = std::sqrt(static_cast<double>(q));
+            s_n  += ez / (q * q_half);
+            s_dn += ez / q_half;
+            s_k  += ez / (q * q * q_half);
+        }
+        na = std::max(0.0, phi0[id] * s_n);
+        dna_deta = std::max(0.0, phi0[id] * s_dn);
+        e_tot_a = na * bshift[id] + phi0[id] * kmean[id] * s_k;
+    };
+
+    for (int it = 0; it < 20; ++it) {
+        double fp = -np_tgt, fn = -nn_tgt, jpp = 1.0e-30, jpn = 0.0, jnn = 1.0e-30;
         for (int id = 0; id < NUM_SPECIES; ++id) {
-            if (phi[id] <= 0.0) continue;
+            if (phi0[id] <= 0.0) continue;
             const SpeciesInfo sp = get_species_info(id);
             const double Z = sp.charge, N = sp.baryon_num - sp.charge;
-            const double arg = std::clamp(Z * up + N * un, -200.0, 80.0);
-            const double na = phi[id] * std::exp(arg);
+            double na = 0.0, dnd = 0.0, ea = 0.0;
+            eval_species(id, up, un, na, dnd, ea);
             fp += Z * na; fn += N * na;
-            jpp += Z * Z * na; jpn += Z * N * na; jnn += N * N * na;
+            jpp += Z * Z * dnd; jpn += Z * N * dnd; jnn += N * N * dnd;
         }
-        if (std::fabs(fp) + std::fabs(fn) < 1.0e-13 * nB_fm3) break;
+        if (std::fabs(fp) + std::fabs(fn) < 1.0e-12 * nB_fm3) break;
         const double det = jpp * jnn - jpn * jpn;
         if (det <= 1.0e-60) break;
-        up -= std::clamp(( jnn * fp - jpn * fn) / det, -2.0, 2.0);
-        un -= std::clamp((-jpn * fp + jpp * fn) / det, -2.0, 2.0);
+        up -= std::clamp(( jnn * fp - jpn * fn) / det, -1.8, 1.8);
+        un -= std::clamp((-jpn * fp + jpp * fn) / det, -1.8, 1.8);
     }
     out_up = up; out_un = un;
     double e_sum = 0.0;
     for (int id = 0; id < NUM_SPECIES; ++id) {
-        if (phi[id] <= 0.0) { n_out[id] = 0.0; continue; }
-        const SpeciesInfo sp = get_species_info(id);
-        n_out[id] = phi[id] * std::exp(std::clamp(sp.charge * up + (sp.baryon_num - sp.charge) * un, -200.0, 80.0));
-        e_sum += n_out[id] * erel[id];
+        if (phi0[id] <= 0.0) { n_out[id] = 0.0; continue; }
+        double dnd = 0.0, ea = 0.0;
+        eval_species(id, up, un, n_out[id], dnd, ea);
+        e_sum += ea;
     }
     return e_sum / std::max(nB_fm3, 1.0e-12);
 }
@@ -142,26 +195,24 @@ inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool 
 
 namespace fo_detail {
 
-// Invert HCGF Nuclear-Cluster EoS (nB, Yp, e_th_per_baryon) -> (T_gev, muB_gev, muQ_gev, n_eq[NUM_SPECIES])
 inline void invert_local_cluster_eos(double nB_fm3, double Yp, double e_th_gev, bool inc_exc, int max_A,
                                      double& T_gev, double& muB_gev, double& muQ_gev,
-                                     double n_eq[NUM_SPECIES]) {
+                                     double n_eq[NUM_SPECIES], bool quantum_stats = true) {
     double T_lo = 0.0015, T_hi = 0.120;
     double up = 0.0, un = 0.0;
-    const double e_lo = solve_hrg_fugacities(T_lo, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un);
+    const double e_lo = solve_hrg_fugacities(T_lo, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
     if (e_th_gev <= e_lo) {
         T_gev = T_lo;
     } else {
         for (int b = 0; b < 22; ++b) {
             const double T_mid = 0.5 * (T_lo + T_hi);
-            const double e_mid = solve_hrg_fugacities(T_mid, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un);
+            const double e_mid = solve_hrg_fugacities(T_mid, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
             if (e_mid < e_th_gev) T_lo = T_mid;
             else T_hi = T_mid;
         }
         T_gev = 0.5 * (T_lo + T_hi);
-        solve_hrg_fugacities(T_gev, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un);
+        solve_hrg_fugacities(T_gev, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
     }
-    // mu_n = m_n + T * u_n == mu_B;   mu_p = m_p + T * u_p == mu_B + mu_Q
     muB_gev = phys::MASS_NEUTRON + T_gev * un;
     muQ_gev = (phys::MASS_PROTON + T_gev * up) - muB_gev;
 }
@@ -224,20 +275,22 @@ inline bool sample_conservative_kbody(const std::vector<int>& sp_ids,
         qx[k] = dx; qy[k] = dy; qz[k] = dz;
         sx += qx[k]; sy += qy[k]; sz += qz[k];
     }
+    double ke_unit = 0.0;
     for (int k = 0; k < K; ++k) {
         const double wf = masses[k] / m_sum;
         qx[k] -= wf * sx; qy[k] -= wf * sy; qz[k] -= wf * sz;
+        ke_unit += (qx[k] * qx[k] + qy[k] * qy[k] + qz[k] * qz[k]) / (2.0 * masses[k]);
     }
-    double eta = 1.0;
-    for (int it = 0; it < 10; ++it) {
+    double eta = (ke_unit > 1.0e-18) ? std::sqrt(std::max(1.0e-8, (Mc - m_sum) / ke_unit)) : 1.0;
+    for (int it = 0; it < 18; ++it) {
         double f = -Mc, df = 0.0;
         for (int k = 0; k < K; ++k) {
             const double q2 = qx[k] * qx[k] + qy[k] * qy[k] + qz[k] * qz[k];
             const double ek = std::sqrt(masses[k] * masses[k] + eta * eta * q2);
             f += ek; df += (eta * q2) / ek;
         }
-        if (std::fabs(f) < 1.0e-13 || df <= 1.0e-20) break;
-        eta = std::max(1.0e-4, eta - f / df);
+        if (std::fabs(f) < 1.0e-14 || df <= 1.0e-20) break;
+        eta = std::max(1.0e-5, eta - f / df);
     }
     out_p4.resize(K);
     out_inward_cnt = 0;
@@ -285,7 +338,8 @@ public:
                                   std::uint64_t seed,
                                   bool force_finalize = false) {
         auto host_p = particles.download();
-        HcgfGridSnapshot snap = compute_hcgf_tmunu_snapshot(n_test, gcfg_, mf_cfg, host_p);
+        const bool excl_frozen = (cfg_.mode == ClusterMode::FreezeoutThermal);
+        HcgfGridSnapshot snap = compute_hcgf_tmunu_snapshot(n_test, gcfg_, mf_cfg, host_p, excl_frozen);
         const int nc = gcfg_.num_cells();
         if (nc <= 0 || cfg_.mode == ClusterMode::Microscopic) return snap;
 
@@ -293,7 +347,7 @@ public:
         std::vector<double> dnb_dt_vec(nc, 0.0);
         for (int c = 0; c < nc; ++c) {
             const double nb = snap.fields[20][c];
-            if (nb > peak_nb_[c]) peak_nb_[c] = nb;
+            if (t_fm >= cfg_.peak_track_time_fm && nb > peak_nb_[c]) peak_nb_[c] = nb;
             dnb_dt_vec[c] = (prev_t_fm_ >= 0.0) ? ((nb - prev_nb_[c]) / dt_snap) : 0.0;
             prev_nb_[c] = nb;
         }
@@ -409,7 +463,15 @@ public:
             auto& idxs = cell_baryons[c];
             if (idxs.size() < 2) continue;
             const double nb_cell = snap.fields[20][c];
-            if (!force_finalize && nb_cell >= cfg_.n_fr_fm3) continue;
+            const bool post_sep_expanding = (t_fm >= 1.35 * cfg_.min_time_fm) &&
+                                            (nb_cell < cfg_.n_fr_fm3) &&
+                                            (dnb_dt_vec[c] <= 0.0);
+            const bool crossed_downward = ((peak_nb_[c] >= cfg_.n_fr_fm3) &&
+                                           (nb_cell < cfg_.n_fr_fm3) &&
+                                           (dnb_dt_vec[c] <= 0.0)) || post_sep_expanding;
+            if (!force_finalize && !(cfg_.require_peak_crossing ? crossed_downward : (nb_cell < cfg_.n_fr_fm3))) {
+                continue;
+            }
 
             PhiloxRng rng(seed ^ 0xC1057E2ULL, static_cast<std::uint64_t>(step), static_cast<std::uint64_t>(c));
 
@@ -449,30 +511,51 @@ public:
             //   E_rest = P_c^mu u_mu = u^0 * E_c - P_c . u
             int Np = 0, Nn = 0;
             double Ec = 0.0, Pxc = 0.0, Pyc = 0.0, Pzc = 0.0;
+            double jbx_c = 0.0, jby_c = 0.0, jbz_c = 0.0;
             for (std::size_t idx : idxs) {
                 const HostParticle& hp = host_p[idx];
                 if (hp.species == PROTON) ++Np; else ++Nn;
                 Ec += hp.E; Pxc += hp.px; Pyc += hp.py; Pzc += hp.pz;
+                const double inv_e = 1.0 / hp.E;
+                jbx_c += hp.px * inv_e; jby_c += hp.py * inv_e; jbz_c += hp.pz * inv_e;
             }
             const int Bc = Np + Nn;
             const double P2 = Pxc * Pxc + Pyc * Pyc + Pzc * Pzc;
-            const double Mc = (Ec * Ec > P2) ? std::sqrt(Ec * Ec - P2) : (Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON);
+            const double Mc_kin = (Ec * Ec > P2) ? std::sqrt(Ec * Ec - P2) : (Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON);
             const double m_rest_nuc = Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON;
 
-            double vx_e = snap.fields[21][c], vy_e = snap.fields[22][c], vz_e = snap.fields[23][c];
-            if (nb_cell <= 1.0e-8 && Ec > 0.0) { vx_e = Pxc / Ec; vy_e = Pyc / Ec; vz_e = Pzc / Ec; }
+            // Exact baryon Eckart collective velocity u^mu = J_B^mu / n_B of cell c's own baryons
+            double vx_e = jbx_c / static_cast<double>(Bc);
+            double vy_e = jby_c / static_cast<double>(Bc);
+            double vz_e = jbz_c / static_cast<double>(Bc);
             const double ve2 = std::min(0.9990, vx_e * vx_e + vy_e * vy_e + vz_e * vz_e);
             const double u0 = 1.0 / std::sqrt(1.0 - ve2);
             const double ux = u0 * vx_e, uy = u0 * vy_e, uz = u0 * vz_e;
+            const double nb_raw = static_cast<double>(Bc) / (std::max(1, n_test) * gcfg_.cell_volume_fm3() * u0);
+            const double nb_loc = std::clamp(std::max(nb_cell, nb_raw), 0.005, cfg_.n_fr_fm3);
+            // Match INCG EoS directly on the n_B = n_fr freeze-out hypersurface when crossing downward!
+            const double nB_eff = (crossed_downward && !force_finalize) ? cfg_.n_fr_fm3 : nb_loc;
+
+            // Include attractive Skyrme+MD potential energy per baryon V_pot / n_B from interacting T_B^munu!
+            const double delta_c = static_cast<double>(Nn - Np) / static_cast<double>(Bc);
+            double v_pot_dens = 0.0, p_pot_dens = 0.0;
+            if (mf_cfg.enabled) {
+                hcgf_detail::eval_skyrme_md_pot_and_press(nB_eff, delta_c, mf_cfg, v_pot_dens, p_pot_dens);
+            }
+            const double v_pot_per_b = (nB_eff > 1.0e-8) ? (v_pot_dens / nB_eff) : 0.0;
 
             const double E_rest_eckart = u0 * Ec - (Pxc * ux + Pyc * uy + Pzc * uz);
-            const double e_th_gev = std::max(0.002, (E_rest_eckart - m_rest_nuc) / static_cast<double>(Bc));
-            const double nB_eff = std::clamp(nb_cell, 0.005, cfg_.n_fr_fm3);
+            const double e_kin_per_b = (E_rest_eckart - m_rest_nuc) / static_cast<double>(Bc);
+            const double e_th_gev = std::clamp(e_kin_per_b + v_pot_per_b, -0.0065, 0.120);
+            const double Mc = mf_cfg.enabled
+                                  ? std::max(m_rest_nuc - 0.0065 * Bc, Mc_kin + Bc * v_pot_per_b)
+                                  : Mc_kin;
             const double Yp = static_cast<double>(Np) / static_cast<double>(Bc);
 
             double T_gev = 0.0, muB_gev = 0.0, muQ_gev = 0.0, n_eq[NUM_SPECIES] = {};
             fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
-                                                cfg_.max_cluster_A, T_gev, muB_gev, muQ_gev, n_eq);
+                                                cfg_.max_cluster_A, T_gev, muB_gev, muQ_gev, n_eq,
+                                                cfg_.quantum_statistics);
 
             double Pstar_cell[6] = {};
             for (int s = 0; s < 6; ++s) Pstar_cell[s] = snap.pkin_eckart[s][c];
@@ -557,7 +640,11 @@ public:
                 m_sum += mk[k];
             }
             if (m_sum >= Mc - 1.0e-5) {
-                for (int k = 0; k < K; ++k) mk[k] = get_species_info(out_species[k]).pole_mass_gev;
+                m_sum = 0.0;
+                for (int k = 0; k < K; ++k) {
+                    mk[k] = get_species_info(out_species[k]).pole_mass_gev;
+                    m_sum += mk[k];
+                }
             }
 
             // Spatial gradient grad(n_B) for Cooper-Frye back-emission tracking / outward filtering
@@ -565,10 +652,12 @@ public:
             mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, gnx, gny, gnz);
             const bool outward_cut = (!force_finalize && cfg_.backflow == BackflowMode::OutwardOnly);
 
+            const double Mc_use = mf_cfg.enabled ? std::max(Mc, m_sum + 0.0012 * K) : Mc;
+            const double Ec_use = mf_cfg.enabled ? std::sqrt(Mc_use * Mc_use + P2) : Ec;
             std::vector<FourVector> p_out;
             int inward_cnt = 0;
             if (!fo_detail::sample_conservative_kbody(
-                    out_species, mk, T_gev, Ec, Pxc, Pyc, Pzc,
+                    out_species, mk, T_gev, Ec_use, Pxc, Pyc, Pzc,
                     outward_cut, dnb_dt_vec[c], gnx, gny, gnz, rng, p_out, inward_cnt,
                     cfg_.local_anisotropy ? Lambda_cell : nullptr)) {
                 records_.push_back(rec);

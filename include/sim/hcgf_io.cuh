@@ -174,12 +174,32 @@ inline void compute_pratt_torrieri_lambda(const double Pstar[6], double Lambda[9
                                 alpha_out[2] * R[i][2] * R[j][2];
 }
 
+// Potential energy per baryon V_pot(n_B, delta) / n_B [GeV] and interaction pressure P_pot [GeV/fm^3]
+inline void eval_skyrme_md_pot_and_press(double nb_baryon, double delta, const MeanFieldConfig& mf_cfg,
+                                         double& v_pot_density_gev_fm3, double& p_pot_gev_fm3) {
+    v_pot_density_gev_fm3 = 0.0;
+    p_pot_gev_fm3 = 0.0;
+    if (!mf_cfg.enabled || nb_baryon <= 1.0e-10) return;
+    const double u = nb_baryon / mf_cfg.rho0_fm3;
+    v_pot_density_gev_fm3 =
+        0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
+        (mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
+        mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
+        0.5 * mf_cfg.C_md_gev * mf_cfg.rho0_fm3 * u * u * 0.80;
+    p_pot_gev_fm3 =
+        0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
+        (mf_cfg.sigma_exp * mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
+        mf_cfg.gamma_sym * mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
+        0.5 * mf_cfg.C_md_gev * mf_cfg.rho0_fm3 * u * u * 0.80;
+}
+
 }  // namespace hcgf_detail
 
 inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
                                                     const GridConfig& gcfg,
                                                     const MeanFieldConfig& mf_cfg,
-                                                    const std::vector<HostParticle>& host_p) {
+                                                    const std::vector<HostParticle>& host_p,
+                                                    bool exclude_frozen = false) {
     HcgfGridSnapshot snap{};
     const int nc = gcfg.num_cells();
     if (nc <= 0) return snap;
@@ -195,6 +215,7 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
     std::vector<double> tmp(nc, 0.0);
 
     for (const auto& hp : host_p) {
+        if (exclude_frozen && hp.freezeout_tag != 0) continue;
         const SpeciesInfo sp = get_species_info(hp.species);
         if (sp.baryon_num <= 0) continue;  // Coarse-grain ONLY baryons (exclude B=0 pions!)
 
@@ -245,19 +266,10 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
         const double jb2 = jbx[c] * jbx[c] + jby[c] * jby[c] + jbz[c] * jbz[c];
         const double nb_baryon = (rb_lab * rb_lab > jb2) ? std::sqrt(rb_lab * rb_lab - jb2) : 0.0;
         if (mf_cfg.enabled && nb_baryon > 1.0e-10 && rb_lab > 1.0e-10) {
-            const double u = nb_baryon / mf_cfg.rho0_fm3;
             const double rb_eff = std::max(rp[c] + rn[c], 1.0e-12);
             const double delta = (rn[c] - rp[c]) / rb_eff;
-            const double v_pot =
-                0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
-                (mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
-                mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
-                0.5 * mf_cfg.C_md_gev * mf_cfg.rho0_fm3 * u * u * 0.80;
-            const double p_pot =
-                0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
-                (mf_cfg.sigma_exp * mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
-                mf_cfg.gamma_sym * mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
-                0.5 * mf_cfg.C_md_gev * mf_cfg.rho0_fm3 * u * u * 0.80;
+            double v_pot = 0.0, p_pot = 0.0;
+            hcgf_detail::eval_skyrme_md_pot_and_press(nb_baryon, delta, mf_cfg, v_pot, p_pot);
             const double u0 = rb_lab / nb_baryon;
             const double ux = jbx[c] / nb_baryon, uy = jby[c] / nb_baryon, uz = jbz[c] / nb_baryon;
             const double w_pot = v_pot + p_pot;

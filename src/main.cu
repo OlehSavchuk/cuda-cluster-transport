@@ -354,6 +354,7 @@ int main(int argc, char** argv) {
     std::string cluster_mode_str = "freezeout";
     std::string backflow_str = "remelt";
     bool local_anisotropy = true;
+    int pauli_override = -1;  // -1: auto (ON in hic mode, OFF in classical box modes); 0: OFF; 1: ON
     int max_cluster_A = 6;
     double nfr_fm3 = 0.040;
     int freezeout_every = 2;
@@ -407,6 +408,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--anisotropy" || arg == "--local-anisotropy") {
             const std::string v = next_str();
             local_anisotropy = (v == "on" || v == "1" || v == "true" || v == "pt");
+        } else if (arg == "--pauli" || arg == "--pauli-blocking") {
+            const std::string v = next_str();
+            pauli_override = (v == "on" || v == "1" || v == "true") ? 1 : 0;
         } else if (arg == "--max-cluster-A") {
             max_cluster_A = std::stoi(next_str());
         } else if (arg == "--nfr") {
@@ -517,6 +521,7 @@ int main(int argc, char** argv) {
     step_cfg.dt_fm = dt_fm;
     step_cfg.n_test = n_test;
     step_cfg.collision_substeps = substeps;
+    step_cfg.pauli_blocking = (pauli_override >= 0) ? (pauli_override == 1) : (mode == "hic");
 
     ClusterMode cluster_mode = ClusterMode::FreezeoutThermal;
     if (cluster_mode_str == "microscopic" || cluster_mode_str == "micro") {
@@ -620,11 +625,15 @@ int main(int argc, char** argv) {
     fo_cfg.cells_csv_path = freezeout_cells_csv;
     if (freezeout_tmin >= 0.0) {
         fo_cfg.min_time_fm = freezeout_tmin;
+        fo_cfg.peak_track_time_fm = std::max(0.0, 0.75 * freezeout_tmin);
     } else if (mode == "hic") {
         const double R_ws = 1.12 * std::cbrt(static_cast<double>(A_nuc));
         const double beta_cm = std::max(0.05, std::tanh(y_cm_beam));
-        fo_cfg.min_time_fm = (R_ws + 2.5) / beta_cm;
+        const double t_overlap = (R_ws + 2.5) / beta_cm;
+        fo_cfg.peak_track_time_fm = 0.80 * t_overlap;
+        fo_cfg.min_time_fm = t_overlap + 3.0;
     } else {
+        fo_cfg.peak_track_time_fm = 0.0;
         fo_cfg.min_time_fm = 0.0;
     }
 
@@ -681,9 +690,9 @@ int main(int argc, char** argv) {
     for (int step = 0; step <= n_steps; ++step) {
         const double t_now = step * dt_fm;
         const bool do_tmunu = (!dump_tmunu_dir.empty() && (step % dump_tmunu_every == 0));
-        const double fo_warmup_t = fo_cfg.min_time_fm - 1.5 * freezeout_every * dt_fm;
+        const double fo_warmup_t = fo_cfg.peak_track_time_fm;
         const bool do_fo_check = (cluster_mode != ClusterMode::Microscopic) &&
-                                 ((step > 0 && step % freezeout_every == 0 && t_now >= fo_warmup_t) || step == n_steps);
+                                 ((step % freezeout_every == 0 && t_now >= fo_warmup_t) || step == n_steps);
         if (do_fo_check || do_tmunu) {
             const HcgfGridSnapshot tmunu_snap = fo_clusterizer.process_step(
                 particles, step, t_now, n_test, mf_cfg, step_cfg.seed, /*force_finalize=*/(step == n_steps));

@@ -9,6 +9,7 @@
 #include "physics/inelastic_channels.cuh"
 #include "physics/kinematics.cuh"
 #include "physics/mean_field.cuh"
+#include "physics/pauli_blocking.cuh"
 #include "physics/resonances.cuh"
 #include "sim/grid.cuh"
 #include "sim/particles.cuh"
@@ -36,6 +37,7 @@ struct StepperConfig {
     CollisionScheme scheme = CollisionScheme::DisjointPairs;
     bool in_medium_energy_conservation = true;  // Conserve E_kin + U(r, p) in 2<->2 & 2<->1 vertices
     bool exact_hamiltonian_projection = false;  // Manifold projection H(t) == H(0) (<1e-12)
+    bool pauli_blocking = false;                // 6D phase-space (1 - f_3)(1 - f_4) nucleon Pauli blocking
     std::uint64_t seed = 20261124ULL;
 };
 
@@ -46,6 +48,7 @@ struct StepStats {
     unsigned long long formations_2to1 = 0;
     unsigned long long decays_1to2 = 0;
     unsigned long long prob_overflows = 0;
+    unsigned long long pauli_blocked = 0;
     double max_prob_seen = 0.0;
 
     unsigned long long total_binary_reactions() const {
@@ -105,10 +108,15 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
                                 const ReactionConfig& rxn_cfg,
                                 const MeanFieldView& mf_view,
                                 bool conserve_med_ec,
+                                const PauliPhaseSpaceView& pauli_view,
                                 PhiloxRng& rng,
                                 unsigned long long* d_overflows,
+                                unsigned long long* d_pauli_blk,
                                 double* d_max_prob) {
     if (!p.active[idx1] || !p.active[idx2]) return 0;
+    if (p.freezeout_tag[idx1] != 0 || p.freezeout_tag[idx2] != 0) return 0;
+    // UrQMD/SMASH cold-nucleus stability: un-struck nucleons within the same initial ground-state nucleus do not scatter
+    if (pauli_view.cfg.enabled && p.collided[idx1] < 0 && p.collided[idx1] == p.collided[idx2]) return 0;
 
     const double m1 = p.mass[idx1];
     const double m2 = p.mass[idx2];
@@ -312,6 +320,15 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
             }
         }
 
+        if (pauli_view.cfg.enabled) {
+            const double f3 = eval_pauli_f(pauli_view, id1, x1, y1, z1, p1_out.x, p1_out.y, p1_out.z);
+            const double f4 = eval_pauli_f(pauli_view, id2, x2, y2, z2, p2_out.x, p2_out.y, p2_out.z);
+            if (rng.uniform() >= (1.0 - f3) * (1.0 - f4)) {
+                if (d_pauli_blk) portable_atomic_add_ull(d_pauli_blk, 1ULL);
+                return 0;
+            }
+        }
+
         p.E[idx1] = p1_out.t; p.px[idx1] = p1_out.x; p.py[idx1] = p1_out.y; p.pz[idx1] = p1_out.z;
         p.E[idx2] = p2_out.t; p.px[idx2] = p2_out.x; p.py[idx2] = p2_out.y; p.pz[idx2] = p2_out.z;
         p.collided[idx1] = 1;
@@ -379,6 +396,15 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
         } else {
             scatter_general_2to2(p1_in, p2_in, kin.sqrt_s, m3, m4, p_cm_out,
                                  cos_theta, phi, p3_out, p4_out);
+        }
+
+        if (pauli_view.cfg.enabled) {
+            const double f3 = eval_pauli_f(pauli_view, out3, x1, y1, z1, p3_out.x, p3_out.y, p3_out.z);
+            const double f4 = eval_pauli_f(pauli_view, out4, x2, y2, z2, p4_out.x, p4_out.y, p4_out.z);
+            if (rng.uniform() >= (1.0 - f3) * (1.0 - f4)) {
+                if (d_pauli_blk) portable_atomic_add_ull(d_pauli_blk, 1ULL);
+                return 0;
+            }
         }
 
         p.species[idx1] = out3;
@@ -452,6 +478,7 @@ HD_INLINE bool try_resonance_decay(ParticleSoAView& p,
                                    double dt,
                                    const MeanFieldView& mf_view,
                                    bool conserve_med_ec,
+                                   const PauliPhaseSpaceView& pauli_view,
                                    PhiloxRng& rng) {
     if (!p.active[i]) return false;
     const int res_id = p.species[i];
@@ -514,6 +541,12 @@ HD_INLINE bool try_resonance_decay(ParticleSoAView& p,
         decay_isotropic_1to2(p_res, m_R, ma, mb, cos_theta, phi, pa_out, pb_out);
     }
 
+    if (pauli_view.cfg.enabled && p.freezeout_tag[i] == 0) {
+        const double fa = eval_pauli_f(pauli_view, d1_id, rx, ry, rz, pa_out.x, pa_out.y, pa_out.z);
+        const double fb = eval_pauli_f(pauli_view, d2_id, rx, ry, rz, pb_out.x, pb_out.y, pb_out.z);
+        if (rng.uniform() >= (1.0 - fa) * (1.0 - fb)) return false;
+    }
+
     // Reserve output slot atomically before mutating parent slot
     const int slot_b = portable_atomic_add_int(p.d_n_slots, 1);
     if (slot_b >= p.capacity) {
@@ -562,13 +595,14 @@ __global__ void decay_resonances_kernel(ParticleSoAView p,
                                         double dt,
                                         MeanFieldView mf_view,
                                         bool conserve_med_ec,
+                                        PauliPhaseSpaceView pauli_view,
                                         std::uint64_t seed,
                                         std::uint64_t decay_step_id,
                                         unsigned long long* d_decays) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_initial_slots) return;
     PhiloxRng rng(seed, decay_step_id, static_cast<std::uint64_t>(i) + 0x9E3779B9ULL);
-    if (try_resonance_decay(p, i, dt, mf_view, conserve_med_ec, rng)) {
+    if (try_resonance_decay(p, i, dt, mf_view, conserve_med_ec, pauli_view, rng)) {
         atomicAdd(d_decays, 1ULL);
     }
 }
@@ -579,11 +613,12 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
                                               ReactionConfig rxn_cfg,
                                               MeanFieldView mf_view,
                                               bool conserve_med_ec,
+                                              PauliPhaseSpaceView pauli_view,
                                               double sub_dt,
                                               int n_test,
                                               std::uint64_t seed,
                                               std::uint64_t step_counter,
-                                              unsigned long long* d_stats,  // [5]: pairs, el, inel, form, overf
+                                              unsigned long long* d_stats,
                                               double* d_max_prob) {
     __shared__ int sh_live_count;
     const int cid = blockIdx.x;
@@ -623,7 +658,7 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
         ++l_tested;
         const int outcome = try_pair_reaction(
             p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg, mf_view, conserve_med_ec,
-            rng, &d_stats[4], d_max_prob);
+            pauli_view, rng, &d_stats[4], &d_stats[6], d_max_prob);
         if (outcome == 1) ++l_el;
         else if (outcome == 2) ++l_inel;
         else if (outcome == 3) ++l_form;
@@ -641,6 +676,7 @@ __global__ void collide_all_pairs_kernel(ParticleSoAView p,
                                          ReactionConfig rxn_cfg,
                                          MeanFieldView mf_view,
                                          bool conserve_med_ec,
+                                         PauliPhaseSpaceView pauli_view,
                                          double sub_dt,
                                          int n_test,
                                          std::uint64_t seed,
@@ -677,7 +713,7 @@ __global__ void collide_all_pairs_kernel(ParticleSoAView p,
             ++l_tested;
             const int outcome = try_pair_reaction(
                 p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg, mf_view, conserve_med_ec,
-                rng, &d_stats[4], d_max_prob);
+                pauli_view, rng, &d_stats[4], &d_stats[6], d_max_prob);
             if (outcome > 0) {
                 if (outcome == 1) ++l_el;
                 else if (outcome == 2) ++l_inel;
@@ -704,7 +740,10 @@ public:
                      ReactionConfig rxn_cfg = ReactionConfig{})
         : step_cfg_(step_cfg), xs_cfg_(xs_cfg), rxn_cfg_(rxn_cfg) {
         rxn_cfg_.norms = compute_spectral_norm_table();
-        d_ull_stats_.resize(6);  // [pairs, el, inel, form, overf, decays]
+        PauliGridConfig pcfg{};
+        pcfg.enabled = step_cfg_.pauli_blocking;
+        pauli_grid_.configure(pcfg);
+        d_ull_stats_.resize(7);  // [pairs, el, inel, form, overf, decays, pauli_blocked]
         d_max_prob_.resize(1);
         reset_stats();
     }
@@ -739,6 +778,9 @@ public:
         }
 
         const MeanFieldView mf_view = use_mf ? mf->view() : MeanFieldView{};
+        if (step_cfg_.pauli_blocking) {
+            pauli_grid_.rebuild(particles, step_cfg_.n_test);
+        }
         if (rxn_cfg_.enable_resonance_2to1_and_decays) {
             decay_resonances(particles, half_dt, step_index_ * 2ULL, mf_view);
         }
@@ -789,6 +831,7 @@ public:
         if (n_cur == 0) return;
 
         ParticleSoAView pview = particles.view();
+        const PauliPhaseSpaceView pauli_view = pauli_grid_.view();
         unsigned long long* d_decays = d_ull_stats_.data() + 5;
         const bool med_ec = step_cfg_.in_medium_energy_conservation;
 
@@ -796,13 +839,13 @@ public:
         constexpr int TPB = 256;
         const int blocks = (n_cur + TPB - 1) / TPB;
         detail::decay_resonances_kernel<<<blocks, TPB>>>(
-            pview, n_cur, dt, mf_view, med_ec, step_cfg_.seed ^ 0xA5A5A5A5ULL, decay_id, d_decays);
+            pview, n_cur, dt, mf_view, med_ec, pauli_view, step_cfg_.seed ^ 0xA5A5A5A5ULL, decay_id, d_decays);
         CUDA_CHECK(cudaGetLastError());
 #else
         for (int i = 0; i < n_cur; ++i) {
             PhiloxRng rng(step_cfg_.seed ^ 0xA5A5A5A5ULL, decay_id,
                           static_cast<std::uint64_t>(i) + 0x9E3779B9ULL);
-            if (detail::try_resonance_decay(pview, i, dt, mf_view, med_ec, rng)) {
+            if (detail::try_resonance_decay(pview, i, dt, mf_view, med_ec, pauli_view, rng)) {
                 *d_decays += 1ULL;
             }
         }
@@ -820,6 +863,7 @@ public:
 
         ParticleSoAView pview = particles.view();
         GridView gview = grid.view();
+        const PauliPhaseSpaceView pauli_view = pauli_grid_.view();
 
         unsigned long long* d_stats = d_ull_stats_.data();
         double* d_maxp = d_max_prob_.data();
@@ -832,14 +876,14 @@ public:
             if (step_cfg_.scheme == CollisionScheme::DisjointPairs) {
                 constexpr int BLOCK_THREADS = 64;
                 detail::collide_disjoint_pairs_kernel<<<n_cells, BLOCK_THREADS>>>(
-                    pview, gview, xs_cfg_, rxn_cfg_, mf_view, med_ec, sub_dt, step_cfg_.n_test,
+                    pview, gview, xs_cfg_, rxn_cfg_, mf_view, med_ec, pauli_view, sub_dt, step_cfg_.n_test,
                     step_cfg_.seed, sub_counter, d_stats, d_maxp);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 constexpr int TPB = 128;
                 const int blocks = (n_cells + TPB - 1) / TPB;
                 detail::collide_all_pairs_kernel<<<blocks, TPB>>>(
-                    pview, gview, xs_cfg_, rxn_cfg_, mf_view, med_ec, sub_dt, step_cfg_.n_test,
+                    pview, gview, xs_cfg_, rxn_cfg_, mf_view, med_ec, pauli_view, sub_dt, step_cfg_.n_test,
                     step_cfg_.seed, sub_counter, d_stats, d_maxp);
                 CUDA_CHECK(cudaGetLastError());
             }
@@ -875,7 +919,7 @@ public:
                         d_stats[0] += 1ULL;
                         const int outcome = detail::try_pair_reaction(
                             pview, idx1, idx2, prefactor, gview.cfg, xs_cfg_, rxn_cfg_, mf_view, med_ec,
-                            rng, &d_stats[4], d_maxp);
+                            pauli_view, rng, &d_stats[4], &d_stats[6], d_maxp);
                         if (outcome == 1) d_stats[1] += 1ULL;
                         else if (outcome == 2) d_stats[2] += 1ULL;
                         else if (outcome == 3) d_stats[3] += 1ULL;
@@ -899,7 +943,7 @@ public:
                             d_stats[0] += 1ULL;
                             const int outcome = detail::try_pair_reaction(
                                 pview, idx1, idx2, prefactor, gview.cfg, xs_cfg_, rxn_cfg_, mf_view, med_ec,
-                                rng, &d_stats[4], d_maxp);
+                                pauli_view, rng, &d_stats[4], &d_stats[6], d_maxp);
                             if (outcome > 0) {
                                 if (outcome == 1) d_stats[1] += 1ULL;
                                 else if (outcome == 2) d_stats[2] += 1ULL;
@@ -916,9 +960,9 @@ public:
 
     StepStats read_stats() const {
         StepStats st{};
-        unsigned long long h_ull[6] = {};
+        unsigned long long h_ull[7] = {};
         double h_maxp = 0.0;
-        d_ull_stats_.copy_to_host(h_ull, 6);
+        d_ull_stats_.copy_to_host(h_ull, 7);
         d_max_prob_.copy_to_host(&h_maxp, 1);
         st.pairs_tested = h_ull[0];
         st.collisions_elastic = h_ull[1];
@@ -926,6 +970,7 @@ public:
         st.formations_2to1 = h_ull[3];
         st.prob_overflows = h_ull[4];
         st.decays_1to2 = h_ull[5];
+        st.pauli_blocked = h_ull[6];
         st.max_prob_seen = h_maxp;
         return st;
     }
@@ -934,11 +979,13 @@ public:
     const StepperConfig& stepper_config() const { return step_cfg_; }
     const CrossSectionConfig& xs_config() const { return xs_cfg_; }
     const ReactionConfig& reaction_config() const { return rxn_cfg_; }
+    const PauliPhaseSpaceGrid& pauli_grid() const { return pauli_grid_; }
 
 private:
     StepperConfig step_cfg_;
     CrossSectionConfig xs_cfg_;
     ReactionConfig rxn_cfg_;
+    PauliPhaseSpaceGrid pauli_grid_;
     std::uint64_t step_index_ = 0;
     bool has_h_target_ = false;
     double h_target_gev_ = 0.0;
