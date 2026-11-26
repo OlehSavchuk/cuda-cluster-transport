@@ -673,6 +673,13 @@ int main(int argc, char** argv) {
                 "Elast", "Inel22", "Form21", "Decay12");
     std::printf("-----------------------------------------------------------------------------------------------------\n");
 
+    if (mode == "hic") {
+        step_cfg.pauli_p_half_gev = std::max(0.72, phys::MASS_NUCLEON_AVG * std::sinh(y_cm_beam) + 0.42);
+        if (gcfg.dx() < 1.35) {
+            mf_cfg.gaussian_smooth_passes = 3;  // Keep finite nuclear surface range sigma ~ 1.2 fm at dx = 1 fm
+        }
+    }
+
     ParticleSystem particles;
     particles.upload(host_init);
 

@@ -103,10 +103,13 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
     std::vector<double> v2_sum(N_CAT * N_YBINS, 0.0), v2_sq(N_CAT * N_YBINS, 0.0);
     std::vector<double> pt_cnt(N_CAT * N_YBINS, 0.0);
 
-    // FOPI standard cut u_t0 > 0.8 (Reisdorf et al., Nucl. Phys. A 876, 2012, Figs. 6, 19, 39)
+    // FOPI standard cuts u_t0 > 0.8 (low energy) and u_t0 > 0.4 (1A GeV regime, NPA 876 Fig. 7)
     std::vector<double> v1_u8_sum(N_CAT * N_YBINS, 0.0), v1_u8_sq(N_CAT * N_YBINS, 0.0);
     std::vector<double> v2_u8_sum(N_CAT * N_YBINS, 0.0), v2_u8_sq(N_CAT * N_YBINS, 0.0);
     std::vector<double> u8_cnt(N_CAT * N_YBINS, 0.0);
+    std::vector<double> v1_u4_sum(N_CAT * N_YBINS, 0.0), v1_u4_sq(N_CAT * N_YBINS, 0.0);
+    std::vector<double> v2_u4_sum(N_CAT * N_YBINS, 0.0), v2_u4_sq(N_CAT * N_YBINS, 0.0);
+    std::vector<double> u4_cnt(N_CAT * N_YBINS, 0.0);
 
     // Differential v2(u_t0) within |y_0| < 0.4 (Reisdorf et al., NPA 876, Figs. 21 & 24)
     std::vector<double> ut_v2_sum(N_CAT * N_UBINS, 0.0), ut_v2_sq(N_CAT * N_UBINS, 0.0);
@@ -130,6 +133,11 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
                     v1_u8_sum[k] += c1; v1_u8_sq[k] += c1 * c1;
                     v2_u8_sum[k] += c2; v2_u8_sq[k] += c2 * c2;
                     u8_cnt[k] += 1.0;
+                }
+                if (ut0 > 0.4) {
+                    v1_u4_sum[k] += c1; v1_u4_sq[k] += c1 * c1;
+                    v2_u4_sum[k] += c2; v2_u4_sq[k] += c2 * c2;
+                    u4_cnt[k] += 1.0;
                 }
             }
         }
@@ -183,7 +191,8 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
     if (!flow_csv_path.empty()) {
         std::ofstream f(flow_csv_path);
         f << "species,bin,y,y0,dN_dy,dN_dy0,v1,v1_err,v2,v2_err,n_stat,"
-             "v1_ut08,v1_ut08_err,v2_ut08,v2_ut08_err,n_ut08\n";
+             "v1_ut08,v1_ut08_err,v2_ut08,v2_ut08_err,n_ut08,"
+             "v1_ut04,v1_ut04_err,v2_ut04,v2_ut04_err,n_ut04\n";
         for (int c = 0; c < N_CAT; ++c) {
             for (int b = 0; b < N_YBINS; ++b) {
                 const int k = c * N_YBINS + b;
@@ -203,10 +212,17 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
                 const double eu8_v1 = (n_u8 > 1) ? std::sqrt(std::max(0.0, v1_u8_sq[k] / n_u8 - u8_v1 * u8_v1) / n_u8) : 0.0;
                 const double eu8_v2 = (n_u8 > 1) ? std::sqrt(std::max(0.0, v2_u8_sq[k] / n_u8 - u8_v2 * u8_v2) / n_u8) : 0.0;
 
+                const double n_u4 = u4_cnt[k];
+                const double u4_v1 = (n_u4 > 0) ? (v1_u4_sum[k] / n_u4) : 0.0;
+                const double u4_v2 = (n_u4 > 0) ? (v2_u4_sum[k] / n_u4) : 0.0;
+                const double eu4_v1 = (n_u4 > 1) ? std::sqrt(std::max(0.0, v1_u4_sq[k] / n_u4 - u4_v1 * u4_v1) / n_u4) : 0.0;
+                const double eu4_v2 = (n_u4 > 1) ? std::sqrt(std::max(0.0, v2_u4_sq[k] / n_u4 - u4_v2 * u4_v2) / n_u4) : 0.0;
+
                 f << cat_names[c] << "," << b << "," << y_c << "," << y0_c << ","
                   << dn_dy << "," << dn_dy0 << ","
                   << m_v1 << "," << e_v1 << "," << m_v2 << "," << e_v2 << "," << n_st << ","
-                  << u8_v1 << "," << eu8_v1 << "," << u8_v2 << "," << eu8_v2 << "," << n_u8 << "\n";
+                  << u8_v1 << "," << eu8_v1 << "," << u8_v2 << "," << eu8_v2 << "," << n_u8 << ","
+                  << u4_v1 << "," << eu4_v1 << "," << u4_v2 << "," << eu4_v2 << "," << n_u4 << "\n";
             }
         }
 

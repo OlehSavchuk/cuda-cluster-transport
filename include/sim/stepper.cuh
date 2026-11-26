@@ -38,6 +38,7 @@ struct StepperConfig {
     bool in_medium_energy_conservation = true;  // Conserve E_kin + U(r, p) in 2<->2 & 2<->1 vertices
     bool exact_hamiltonian_projection = false;  // Manifold projection H(t) == H(0) (<1e-12)
     bool pauli_blocking = false;                // 6D phase-space (1 - f_3)(1 - f_4) nucleon Pauli blocking
+    double pauli_p_half_gev = 0.72;             // Momentum half-range [GeV/c] of 6D Pauli grid (scales with E_lab!)
     std::uint64_t seed = 20261124ULL;
 };
 
@@ -742,6 +743,8 @@ public:
         rxn_cfg_.norms = compute_spectral_norm_table();
         PauliGridConfig pcfg{};
         pcfg.enabled = step_cfg_.pauli_blocking;
+        pcfg.p_half_gev = step_cfg_.pauli_p_half_gev;
+        if (pcfg.p_half_gev > 0.85) pcfg.np = 16;  // Keep dp ~ 0.15 GeV/c resolution at 1+ AGeV!
         pauli_grid_.configure(pcfg);
         d_ull_stats_.resize(7);  // [pairs, el, inel, form, overf, decays, pauli_blocked]
         d_max_prob_.resize(1);

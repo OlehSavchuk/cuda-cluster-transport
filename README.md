@@ -12,7 +12,14 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### 1. Grand-Canonical Poisson HCGF ($\Delta x = 1.0\;\text{fm}$) + 3D Coulomb + Exact $T^{00}$ Potential vs. FOPI Data
+### 1. FOPI $\text{Au}+\text{Au}$ @ $1.2\,A\;\text{GeV}$: `SM` ($K_0 = 215\;\text{MeV}$) vs. `HM` ($K_0 = 380\;\text{MeV}$) Grand-Canonical HCGF + $\Delta(1232)/\pi$ Transport
+High-statistics (`6,400` $\text{Au}+\text{Au}$ events, `scripts/run_auau1200_benchmark.py`, `--elab-amev 1200 --box 68 --grid 68 --sampling gc --coulomb on --pauli on`) benchmark across central ($b_0 < 0.15$) baryon/cluster + pion multiplicities ($p, d, t, {}^3\text{He}, {}^4\text{He}, \pi^-, \pi^+$) and semi-central ($0.25 < b_0 < 0.45$) directed flow $v_1(y_0)$ ($u_{t0} > 0.4$) and squeeze-out $v_2(u_{t0})$ ($|y_0| < 0.4$) against FOPI Collaboration data:
+
+<p align="center">
+  <img src="assets/fopi_auau1200_sm_vs_hm.png" alt="FOPI Au+Au 1.2 A GeV SM vs HM Grand-Canonical HCGF Benchmark" width="100%">
+</p>
+
+### 2. Grand-Canonical Poisson HCGF ($\Delta x = 1.0\;\text{fm}$) + 3D Coulomb + Exact $T^{00}$ Potential vs. FOPI $0.25\,A\;\text{GeV}$ Data
 High-statistics FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ benchmark (`scripts/run_gc_dx1fm_benchmark.py`, `--box 68 --grid 68 --sampling gc --coulomb on --pauli on`) showing how $\Delta x = 1.0\;\text{fm}$ coarse-graining removes sub-cell Hubble shear smearing (cooling $\langle T_{\text{fr}} \rangle$ from $14.3\;\text{MeV} \to 9.5\;\text{MeV}$) and how **Grand-Canonical Poisson particlization (`--sampling gc`)** brings $p, d, t, {}^3\text{He}$ yields, $v_1(y_0)$, and squeeze-out $v_2(u_{t0})$ into close agreement with published FOPI data:
 
 <p align="center">

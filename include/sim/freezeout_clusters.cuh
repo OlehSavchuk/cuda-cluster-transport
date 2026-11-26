@@ -204,13 +204,13 @@ namespace fo_detail {
 inline void invert_local_cluster_eos(double nB_fm3, double Yp, double e_th_gev, bool inc_exc, int max_A,
                                      double& T_gev, double& muB_gev, double& muQ_gev,
                                      double n_eq[NUM_SPECIES], bool quantum_stats = true) {
-    double T_lo = 0.0015, T_hi = 0.120;
+    double T_lo = 0.0015, T_hi = 0.165;
     double up = 0.0, un = 0.0;
     const double e_lo = solve_hrg_fugacities(T_lo, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
     if (e_th_gev <= e_lo) {
         T_gev = T_lo;
     } else {
-        for (int b = 0; b < 22; ++b) {
+        for (int b = 0; b < 24; ++b) {
             const double T_mid = 0.5 * (T_lo + T_hi);
             const double e_mid = solve_hrg_fugacities(T_mid, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
             if (e_mid < e_th_gev) T_lo = T_mid;
@@ -580,7 +580,7 @@ public:
             if (Bc == 1 && nb_cell > 1.0e-5 && snap.fields[18][c] > 0.0f) {
                 e_th_gev = 0.5 * ((static_cast<double>(snap.fields[18][c]) / nb_cell) - m_rest_nuc);
             }
-            e_th_gev = std::clamp(e_th_gev, -0.0065, 0.120);
+            e_th_gev = std::clamp(e_th_gev, -0.0065, 0.350);
             const bool use_smooth_yp = (cfg_.sampling == FreezeoutSampling::GrandCanonical) || (Bc < 16);
             const double Yp = (!use_smooth_yp || snap.fields[10][c] <= 1.0e-6f)
                                   ? (static_cast<double>(Np) / static_cast<double>(Bc))
@@ -633,6 +633,12 @@ public:
                 double gnx = 0.0, gny = 0.0, gnz = 0.0;
                 mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, gnx, gny, gnz);
                 const bool outward_cut = (!force_finalize && cfg_.backflow == BackflowMode::OutwardOnly);
+                // Use smooth coarse-grained Eckart fluid velocity on sparse 1-fm^3 cells to avoid small-Bc boost noise!
+                double vxg = vx_e, vyg = vy_e, vzg = vz_e, u0g = u0;
+                if (Bc < 16 && snap.fields[10][c] > 1.0e-5f) {
+                    vxg = snap.fields[21][c]; vyg = snap.fields[22][c]; vzg = snap.fields[23][c];
+                    u0g = 1.0 / std::sqrt(1.0 - std::min(0.9990, vxg * vxg + vyg * vyg + vzg * vzg));
+                }
                 int n_cl_gc = 0, inward_gc = 0;
                 std::size_t slot_cur = 0;
 
@@ -651,7 +657,7 @@ public:
                         const double pys = Lambda_cell[3] * q.x + Lambda_cell[4] * q.y + Lambda_cell[5] * q.z;
                         const double pzs = Lambda_cell[6] * q.x + Lambda_cell[7] * q.y + Lambda_cell[8] * q.z;
                         const double es = std::sqrt(mk * mk + pxs * pxs + pys * pys + pzs * pzs);
-                        const FourVector plab = lorentz_boost_from_cm(mk, es, pxs, pys, pzs, vx_e, vy_e, vz_e, u0);
+                        const FourVector plab = lorentz_boost_from_cm(mk, es, pxs, pys, pzs, vxg, vyg, vzg, u0g);
 
                         const double adv = dnb_dt_vec[c] + (plab.x * gnx + plab.y * gny + plab.z * gnz) / plab.t;
                         if (adv > 0.0) {
