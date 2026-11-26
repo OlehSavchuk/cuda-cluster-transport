@@ -44,9 +44,43 @@ struct HcgfTmunuHeader {
 
 struct HcgfGridSnapshot {
     std::vector<float> fields[24];
+    // 3x3 Eckart rest-frame baryon kinetic stress tensor [Pxx*, Pxy*, Pxz*, Pyy*, Pyz*, Pzz*] [GeV/fm^3]
+    std::vector<float> pkin_eckart[6];
 };
 
 namespace hcgf_detail {
+
+// Exact Lorentz boost projection P*_ij = L^i_mu L^j_nu T^munu into rest frame moving at v = (vx, vy, vz)
+inline void project_stress_to_rest_frame(double vx, double vy, double vz,
+                                         double T00, double T0x, double T0y, double T0z,
+                                         double Txx, double Txy, double Txz,
+                                         double Tyy, double Tyz, double Tzz,
+                                         double Pstar[6]) {
+    const double v2 = std::min(0.9990, vx * vx + vy * vy + vz * vz);
+    const double u0 = 1.0 / std::sqrt(1.0 - v2);
+    const double ux = u0 * vx, uy = u0 * vy, uz = u0 * vz;
+    const double ig = 1.0 / (u0 + 1.0);
+    const double L[3][4] = {
+        {-ux, 1.0 + ux * ux * ig,       ux * uy * ig,       ux * uz * ig},
+        {-uy,       uy * ux * ig, 1.0 + uy * uy * ig,       uy * uz * ig},
+        {-uz,       uz * ux * ig,       uz * uy * ig, 1.0 + uz * uz * ig}
+    };
+    const double T[4][4] = {
+        {T00, T0x, T0y, T0z},
+        {T0x, Txx, Txy, Txz},
+        {T0y, Txy, Tyy, Tyz},
+        {T0z, Txz, Tyz, Tzz}
+    };
+    int idx = 0;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = i; j < 3; ++j) {
+            double s = 0.0;
+            for (int a = 0; a < 4; ++a)
+                for (int b = 0; b < 4; ++b) s += L[i][a] * L[j][b] * T[a][b];
+            Pstar[idx++] = s;
+        }
+    }
+}
 
 // Extract Eckart collective 4-velocity u^mu = J_B^mu / n_B = gamma_E * (1, v_E) from baryon 4-current,
 // and project baryon stress-energy tensor T_B^munu into the Eckart rest frame:
@@ -86,6 +120,60 @@ inline void eval_eckart_frame(double JB0, double JBx, double JBy, double JBz,
     P_e = (eps_e - trace_gT) / 3.0;
 }
 
+// Pratt-Torrieri symmetric positive-definite linear momentum transformation p*_i = Lambda_ij q_j
+// with exact volume preservation det(Lambda) == 1 matching 3x3 Eckart pressure tensor P*_ij:
+//   Lambda = R * diag(alpha_1, alpha_2, alpha_3) * R^T,   alpha_m^2 proportional to eig_m(P*_ij)
+inline void compute_pratt_torrieri_lambda(const double Pstar[6], double Lambda[9], double alpha_out[3]) {
+    Lambda[0] = 1.0; Lambda[1] = 0.0; Lambda[2] = 0.0;
+    Lambda[3] = 0.0; Lambda[4] = 1.0; Lambda[5] = 0.0;
+    Lambda[6] = 0.0; Lambda[7] = 0.0; Lambda[8] = 1.0;
+    alpha_out[0] = alpha_out[1] = alpha_out[2] = 1.0;
+
+    const double p_mean = (Pstar[0] + Pstar[3] + Pstar[5]) / 3.0;
+    if (p_mean <= 1.0e-14) return;
+
+    double A[3][3] = {
+        {Pstar[0], Pstar[1], Pstar[2]},
+        {Pstar[1], Pstar[3], Pstar[4]},
+        {Pstar[2], Pstar[4], Pstar[5]}
+    };
+    double R[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
+    for (int sw = 0; sw < 12; ++sw) {
+        for (int p = 0; p < 2; ++p) {
+            for (int q = p + 1; q < 3; ++q) {
+                const double apq = A[p][q];
+                if (std::fabs(apq) <= 1.0e-15 * p_mean) continue;
+                const double tau = (A[q][q] - A[p][p]) / (2.0 * apq);
+                const double t = (tau >= 0.0) ? (1.0 / (tau + std::sqrt(1.0 + tau * tau)))
+                                              : (-1.0 / (-tau + std::sqrt(1.0 + tau * tau)));
+                const double c = 1.0 / std::sqrt(1.0 + t * t), s = t * c;
+                A[p][p] -= t * apq; A[q][q] += t * apq; A[p][q] = A[q][p] = 0.0;
+                for (int r = 0; r < 3; ++r) {
+                    if (r != p && r != q) {
+                        const double arp = A[r][p], arq = A[r][q];
+                        A[r][p] = A[p][r] = c * arp - s * arq;
+                        A[r][q] = A[q][r] = s * arp + c * arq;
+                    }
+                    const double rrp = R[r][p], rrq = R[r][q];
+                    R[r][p] = c * rrp - s * rrq;
+                    R[r][q] = s * rrp + c * rrq;
+                }
+            }
+        }
+    }
+    double a[3];
+    for (int m = 0; m < 3; ++m) a[m] = std::sqrt(std::max(A[m][m], 0.04 * p_mean) + 0.01 * p_mean);
+    const double g1 = std::cbrt(a[0] * a[1] * a[2]);
+    for (int m = 0; m < 3; ++m) a[m] = std::clamp(a[m] / g1, 0.40, 2.50);
+    const double g2 = std::cbrt(a[0] * a[1] * a[2]);
+    for (int m = 0; m < 3; ++m) alpha_out[m] = a[m] / g2;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            Lambda[3 * i + j] = alpha_out[0] * R[i][0] * R[j][0] +
+                                alpha_out[1] * R[i][1] * R[j][1] +
+                                alpha_out[2] * R[i][2] * R[j][2];
+}
+
 }  // namespace hcgf_detail
 
 inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
@@ -96,6 +184,7 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
     const int nc = gcfg.num_cells();
     if (nc <= 0) return snap;
     for (int f = 0; f < 24; ++f) snap.fields[f].assign(nc, 0.0f);
+    for (int s = 0; s < 6; ++s) snap.pkin_eckart[s].assign(nc, 0.0f);
 
     const double inv_n_dV = 1.0 / (static_cast<double>(n_test) * gcfg.cell_volume_fm3());
     std::vector<double> t00(nc, 0.0), t0x(nc, 0.0), t0y(nc, 0.0), t0z(nc, 0.0);
@@ -182,6 +271,15 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
         hcgf_detail::eval_eckart_frame(jb0[c], jbx[c], jby[c], jbz[c],
                                        T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz,
                                        nb_e, eps_e, P_e, vx_e, vy_e, vz_e);
+
+        double pkin_star[6] = {};
+        if (nb_e > 1.0e-12) {
+            hcgf_detail::project_stress_to_rest_frame(
+                vx_e, vy_e, vz_e,
+                t00[c], t0x[c], t0y[c], t0z[c],
+                txx[c], txy[c], txz[c], tyy[c], tyz[c], tzz[c], pkin_star);
+        }
+        for (int s = 0; s < 6; ++s) snap.pkin_eckart[s][c] = static_cast<float>(pkin_star[s]);
 
         const double vals[24] = {
             T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz,

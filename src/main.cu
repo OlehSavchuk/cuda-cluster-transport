@@ -353,6 +353,7 @@ int main(int argc, char** argv) {
     int dump_tmunu_every = 5;
     std::string cluster_mode_str = "freezeout";
     std::string backflow_str = "remelt";
+    bool local_anisotropy = true;
     int max_cluster_A = 6;
     double nfr_fm3 = 0.040;
     int freezeout_every = 2;
@@ -403,6 +404,9 @@ int main(int argc, char** argv) {
             cluster_mode_str = next_str();
         } else if (arg == "--backflow") {
             backflow_str = next_str();
+        } else if (arg == "--anisotropy" || arg == "--local-anisotropy") {
+            const std::string v = next_str();
+            local_anisotropy = (v == "on" || v == "1" || v == "true" || v == "pt");
         } else if (arg == "--max-cluster-A") {
             max_cluster_A = std::stoi(next_str());
         } else if (arg == "--nfr") {
@@ -612,6 +616,7 @@ int main(int argc, char** argv) {
     else fo_cfg.backflow = BackflowMode::RemeltInDense;
     fo_cfg.n_fr_fm3 = nfr_fm3;
     fo_cfg.max_cluster_A = max_cluster_A;
+    fo_cfg.local_anisotropy = local_anisotropy;
     fo_cfg.cells_csv_path = freezeout_cells_csv;
     if (freezeout_tmin >= 0.0) {
         fo_cfg.min_time_fm = freezeout_tmin;

@@ -1129,6 +1129,102 @@ void test_a456_isotopes_and_cascade_decays() {
                 dec.size(), alpha_feed6 / n4[ALPHA]);
 }
 
+void test_hcgf_pratt_torrieri_momentum_anisotropy() {
+    // 1. Verify exact Lorentz stress projection P*_ij & det(Lambda) == 1 on boosted 3D shear tensor
+    const double vx = 0.22, vy = -0.14, vz = 0.31;
+    const double v2 = vx * vx + vy * vy + vz * vz;
+    const double u0 = 1.0 / std::sqrt(1.0 - v2), ux = u0 * vx, uy = u0 * vy, uz = u0 * vz;
+    const double ig = 1.0 / (u0 + 1.0);
+    const double B[4][4] = {
+        {u0, ux, uy, uz},
+        {ux, 1.0 + ux * ux * ig, ux * uy * ig, ux * uz * ig},
+        {uy, uy * ux * ig, 1.0 + uy * uy * ig, uy * uz * ig},
+        {uz, uz * ux * ig, uz * uy * ig, 1.0 + uz * uz * ig}
+    };
+    const double T0[4][4] = {
+        {0.020,  0.0,     0.0,     0.0},
+        {0.0,    0.0010,  0.0,     0.00045},
+        {0.0,    0.0,     0.0026,  0.0},
+        {0.0,    0.00045, 0.0,     0.0009}
+    };
+    double Tlab[4][4] = {};
+    for (int m = 0; m < 4; ++m)
+        for (int n = 0; n < 4; ++n)
+            for (int a = 0; a < 4; ++a)
+                for (int b = 0; b < 4; ++b) Tlab[m][n] += B[m][a] * B[n][b] * T0[a][b];
+
+    double nb_e = 0.0, eps_e = 0.0, P_e = 0.0, vxe = 0.0, vye = 0.0, vze = 0.0, Pstar[6] = {};
+    hcgf_detail::eval_eckart_frame(0.020 * u0, 0.020 * ux, 0.020 * uy, 0.020 * uz,
+                                   Tlab[0][0], Tlab[0][1], Tlab[0][2], Tlab[0][3],
+                                   Tlab[1][1], Tlab[1][2], Tlab[1][3], Tlab[2][2], Tlab[2][3], Tlab[3][3],
+                                   nb_e, eps_e, P_e, vxe, vye, vze);
+    hcgf_detail::project_stress_to_rest_frame(vxe, vye, vze,
+                                              Tlab[0][0], Tlab[0][1], Tlab[0][2], Tlab[0][3],
+                                              Tlab[1][1], Tlab[1][2], Tlab[1][3], Tlab[2][2], Tlab[2][3], Tlab[3][3],
+                                              Pstar);
+    TEST_ASSERT(std::fabs(Pstar[0] - 0.0010) < 1.0e-14 && std::fabs(Pstar[3] - 0.0026) < 1.0e-14 &&
+                std::fabs(Pstar[2] - 0.00045) < 1.0e-14 &&
+                std::fabs((Pstar[0] + Pstar[3] + Pstar[5]) / 3.0 - P_e) < 1.0e-14,
+                "Eckart rest-frame 3x3 stress projection mismatch");
+
+    double L[9] = {}, alp[3] = {};
+    hcgf_detail::compute_pratt_torrieri_lambda(Pstar, L, alp);
+    const double detL = L[0] * (L[4] * L[8] - L[5] * L[7]) -
+                        L[1] * (L[3] * L[8] - L[5] * L[6]) +
+                        L[2] * (L[3] * L[7] - L[4] * L[6]);
+    TEST_ASSERT(std::fabs(detL - 1.0) < 1.0e-14 && std::fabs(L[1] - L[3]) < 1.0e-15,
+                "Pratt-Torrieri Lambda must be symmetric with exact det(Lambda) == 1");
+
+    // 2. Verify FreezeoutCellClusterizer transfers local squeeze-out onto A>=2 clusters with exact P^mu conservation
+    GridConfig gcfg{};
+    gcfg.nx = 4; gcfg.ny = 4; gcfg.nz = 4;
+    gcfg.xmin = 0.0; gcfg.xmax = 12.0; gcfg.ymin = 0.0; gcfg.ymax = 12.0; gcfg.zmin = 0.0; gcfg.zmax = 12.0;
+    gcfg.boundary = BoundaryMode::PeriodicBox;
+    PhiloxRng rng(9911ULL, 0ULL, 0ULL);
+    std::vector<HostParticle> base_p;
+    double E0 = 0.0, Px0 = 0.0;
+    for (int i = 0; i < 3200; ++i) {
+        HostParticle hp{};
+        hp.species = (i % 5 < 2) ? PROTON : NEUTRON;
+        hp.mass = get_species_info(hp.species).pole_mass_gev;
+        hp.x = 12.0 * rng.uniform(); hp.y = 12.0 * rng.uniform(); hp.z = 12.0 * rng.uniform();
+        const double qx = std::sqrt(hp.mass * 0.005) * rng.normal();
+        const double qy = std::sqrt(hp.mass * 0.024) * rng.normal();
+        const double qz = std::sqrt(hp.mass * 0.010) * rng.normal();
+        const double eq = std::sqrt(hp.mass * hp.mass + qx * qx + qy * qy + qz * qz);
+        const FourVector pl = lorentz_boost_from_cm(hp.mass, eq, qx, qy, qz, 0.14, 0.0, 0.22, 1.0 / std::sqrt(1.0 - 0.068));
+        hp.E = pl.t; hp.px = pl.x; hp.py = pl.y; hp.pz = pl.z;
+        base_p.push_back(hp);
+        E0 += hp.E; Px0 += hp.px;
+    }
+    auto eval_cl_squeeze = [&](bool aniso_on, int& n_cl_out) {
+        ParticleSystem ps; ps.upload(base_p);
+        FreezeoutConfig fc{}; fc.mode = ClusterMode::FreezeoutThermal; fc.n_fr_fm3 = 0.030; fc.local_anisotropy = aniso_on;
+        FreezeoutCellClusterizer clz(fc, gcfg);
+        clz.process_step(ps, 1, 5.0, 100, make_mean_field_config(EOSPreset::None), 4242ULL, true);
+        const auto out = ps.download();
+        double E1 = 0.0, Px1 = 0.0, kxx = 0.0, kyy = 0.0;
+        n_cl_out = 0;
+        for (const auto& hp : out) {
+            E1 += hp.E; Px1 += hp.px;
+            if (get_species_info(hp.species).baryon_num >= 2) {
+                ++n_cl_out;
+                const FourVector pc = lorentz_boost_from_cm(hp.mass, hp.E, hp.px, hp.py, hp.pz, -0.14, 0.0, -0.22, 1.0 / std::sqrt(1.0 - 0.068));
+                kxx += (pc.x * pc.x) / hp.mass; kyy += (pc.y * pc.y) / hp.mass;
+            }
+        }
+        TEST_ASSERT(std::fabs(E1 - E0) / E0 < 1.0e-13 && std::fabs(Px1 - Px0) < 1.0e-12, "Anisotropic FO violated P^mu");
+        return (kyy - kxx) / std::max(kyy + kxx, 1.0e-12);
+    };
+    int n_cl_iso = 0, n_cl_pt = 0;
+    const double sq_iso = eval_cl_squeeze(false, n_cl_iso);
+    const double sq_pt  = eval_cl_squeeze(true,  n_cl_pt);
+    TEST_ASSERT(n_cl_pt == n_cl_iso && n_cl_pt > 50, "det(Lambda)=1 must preserve exact cluster multiplicities");
+    TEST_ASSERT(std::fabs(sq_iso) < 0.10 && sq_pt > 0.42, "Pratt-Torrieri failed to imprint local squeeze-out onto clusters");
+    std::printf("[PASS] test_hcgf_pratt_torrieri_momentum_anisotropy (detL=%.6f, N_cl=%d, eps_cl: iso=%+.3f -> PT=%+.3f)\n",
+                detL, n_cl_pt, sq_iso, sq_pt);
+}
+
 }  // namespace
 
 int main() {
@@ -1153,6 +1249,7 @@ int main() {
     test_hcgf_tmunu_and_landau_frame();
     test_pure_hadron_and_grid_freezeout_clusters();
     test_a456_isotopes_and_cascade_decays();
+    test_hcgf_pratt_torrieri_momentum_anisotropy();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

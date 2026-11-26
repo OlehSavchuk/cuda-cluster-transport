@@ -40,6 +40,7 @@ struct FreezeoutConfig {
     double min_time_fm = 0.0;         // Minimum time before expansion freeze-out check activates [fm/c]
     int max_cluster_A = 6;            // Max nuclear mass number A included in EoS & sampling (up to 6!)
     bool include_excited_clusters = true;  // Include d* and A=4,5,6 statistical resonances (feed-down!)
+    bool local_anisotropy = true;     // Pratt-Torrieri p*_i = Lambda_ij q_j (det Lambda = 1) matching P*_ij!
     std::string cells_csv_path;       // Optional CSV log of every freeze-out cell (t, x, y, z, T, muB, muQ, u^mu)
 };
 
@@ -54,6 +55,8 @@ struct FreezeoutCellRecord {
     double muB_mev = 0.0;
     double muQ_mev = 0.0;
     double ux = 0.0, uy = 0.0, uz = 0.0;
+    double aniso_stretch = 1.0;       // alpha_max / alpha_min of Pratt-Torrieri Lambda
+    double shear_xy = 0.0;            // (P*_xx - P*_yy) / (P*_xx + P*_yy) in Eckart rest frame
     int baryons_converted = 0;
     int clusters_formed = 0;
     int back_emitted = 0;
@@ -179,7 +182,8 @@ inline int sample_poisson(double lam, PhiloxRng& rng) {
     return k - 1;
 }
 
-// Conservative K-body thermal Maxwell-Juttner sampler matching exact lab 4-momentum (E_tot, P_tot)
+// Conservative K-body Pratt-Torrieri (p*_i = Lambda_ij q_j, det Lambda = 1) Maxwell-Juttner sampler
+// matching both the local 3x3 Eckart stress anisotropy and exact cell 4-momentum (E_tot, P_tot)
 inline bool sample_conservative_kbody(const std::vector<int>& sp_ids,
                                       const std::vector<double>& masses,
                                       double T_gev,
@@ -188,7 +192,10 @@ inline bool sample_conservative_kbody(const std::vector<int>& sp_ids,
                                       double dt_nb, double gnx, double gny, double gnz,
                                       PhiloxRng& rng,
                                       std::vector<FourVector>& out_p4,
-                                      int& out_inward_cnt) {
+                                      int& out_inward_cnt,
+                                      const double* Lambda_opt = nullptr) {
+    static constexpr double I3[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    const double* L = (Lambda_opt != nullptr) ? Lambda_opt : I3;
     const int K = static_cast<int>(sp_ids.size());
     const double P2 = Px * Px + Py * Py + Pz * Pz;
     if (K < 2 || E_tot * E_tot <= P2) return false;
@@ -202,15 +209,19 @@ inline bool sample_conservative_kbody(const std::vector<int>& sp_ids,
     std::vector<double> qx(K), qy(K), qz(K);
     double sx = 0.0, sy = 0.0, sz = 0.0;
     for (int k = 0; k < K; ++k) {
-        FourVector q4{};
+        double dx = 0.0, dy = 0.0, dz = 0.0;
         for (int tr = 0; tr < (check_outward ? 16 : 1); ++tr) {
-            q4 = sample_maxwell_juttner(masses[k], T_gev, rng);
+            const FourVector q4 = sample_maxwell_juttner(masses[k], T_gev, rng);
+            dx = L[0] * q4.x + L[1] * q4.y + L[2] * q4.z;
+            dy = L[3] * q4.x + L[4] * q4.y + L[5] * q4.z;
+            dz = L[6] * q4.x + L[7] * q4.y + L[8] * q4.z;
             if (!check_outward) break;
-            const FourVector pl = lorentz_boost_from_cm(masses[k], q4.t, q4.x, q4.y, q4.z, bx, by, bz, gam);
+            const double ed = std::sqrt(masses[k] * masses[k] + dx * dx + dy * dy + dz * dz);
+            const FourVector pl = lorentz_boost_from_cm(masses[k], ed, dx, dy, dz, bx, by, bz, gam);
             const double dnb_dt = dt_nb + (pl.x * gnx + pl.y * gny + pl.z * gnz) / pl.t;
             if (dnb_dt <= 0.0) break;
         }
-        qx[k] = q4.x; qy[k] = q4.y; qz[k] = q4.z;
+        qx[k] = dx; qy[k] = dy; qz[k] = dz;
         sx += qx[k]; sy += qy[k]; sz += qz[k];
     }
     for (int k = 0; k < K; ++k) {
@@ -463,6 +474,17 @@ public:
             fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
                                                 cfg_.max_cluster_A, T_gev, muB_gev, muQ_gev, n_eq);
 
+            double Pstar_cell[6] = {};
+            for (int s = 0; s < 6; ++s) Pstar_cell[s] = snap.pkin_eckart[s][c];
+            double Lambda_cell[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+            double alphas[3] = {1.0, 1.0, 1.0};
+            if (cfg_.local_anisotropy) {
+                hcgf_detail::compute_pratt_torrieri_lambda(Pstar_cell, Lambda_cell, alphas);
+            }
+            const double a_min = std::min({alphas[0], alphas[1], alphas[2]});
+            const double a_max = std::max({alphas[0], alphas[1], alphas[2]});
+            const double p_xy_sum = Pstar_cell[0] + Pstar_cell[3];
+
             const int ix = c % gcfg_.nx, iy = (c / gcfg_.nx) % gcfg_.ny, iz = c / (gcfg_.nx * gcfg_.ny);
             FreezeoutCellRecord rec{};
             rec.step = step; rec.cell_id = c; rec.t_fm = t_fm;
@@ -473,6 +495,8 @@ public:
             rec.e_rest_mev_per_b = e_th_gev * 1.0e3;
             rec.T_mev = T_gev * 1.0e3; rec.muB_mev = muB_gev * 1.0e3; rec.muQ_mev = muQ_gev * 1.0e3;
             rec.ux = ux; rec.uy = uy; rec.uz = uz;
+            rec.aniso_stretch = (a_min > 0.0) ? (a_max / a_min) : 1.0;
+            rec.shear_xy = (p_xy_sum > 1.0e-14) ? ((Pstar_cell[0] - Pstar_cell[3]) / p_xy_sum) : 0.0;
             rec.baryons_converted = Bc;
 
             if (cfg_.mode == ClusterMode::None) {
@@ -545,7 +569,8 @@ public:
             int inward_cnt = 0;
             if (!fo_detail::sample_conservative_kbody(
                     out_species, mk, T_gev, Ec, Pxc, Pyc, Pzc,
-                    outward_cut, dnb_dt_vec[c], gnx, gny, gnz, rng, p_out, inward_cnt)) {
+                    outward_cut, dnb_dt_vec[c], gnx, gny, gnz, rng, p_out, inward_cnt,
+                    cfg_.local_anisotropy ? Lambda_cell : nullptr)) {
                 records_.push_back(rec);
                 continue;
             }
@@ -581,13 +606,15 @@ public:
     void write_freezeout_cells_csv() const {
         if (cfg_.cells_csv_path.empty()) return;
         std::ofstream f(cfg_.cells_csv_path);
-        f << "step,cell_id,t_fm,x_fm,y_fm,z_fm,nB_eckart_fm3,e_rest_mev_per_b,T_mev,muB_mev,muQ_mev,ux,uy,uz,baryons_converted,clusters_formed,back_emitted\n";
+        f << "step,cell_id,t_fm,x_fm,y_fm,z_fm,nB_eckart_fm3,e_rest_mev_per_b,T_mev,muB_mev,muQ_mev,"
+             "ux,uy,uz,aniso_stretch,shear_xy,baryons_converted,clusters_formed,back_emitted\n";
         for (const auto& r : records_) {
             f << r.step << "," << r.cell_id << "," << r.t_fm << ","
               << r.x_fm << "," << r.y_fm << "," << r.z_fm << ","
               << r.nB_eckart_fm3 << "," << r.e_rest_mev_per_b << ","
               << r.T_mev << "," << r.muB_mev << "," << r.muQ_mev << ","
               << r.ux << "," << r.uy << "," << r.uz << ","
+              << r.aniso_stretch << "," << r.shear_xy << ","
               << r.baryons_converted << "," << r.clusters_formed << "," << r.back_emitted << "\n";
         }
     }
