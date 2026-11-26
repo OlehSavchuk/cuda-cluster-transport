@@ -521,8 +521,8 @@ int main(int argc, char** argv) {
 
     EOSPreset eos_preset = EOSPreset::None;
     if (eos_name == "skyrme-soft") eos_preset = EOSPreset::SkyrmeSoft;
-    else if (eos_name == "md-soft") eos_preset = EOSPreset::MDSoft;
-    else if (eos_name == "md-stiff") eos_preset = EOSPreset::MDStiff;
+    else if (eos_name == "md-soft" || eos_name == "sm" || eos_name == "SM") eos_preset = EOSPreset::MDSoft;
+    else if (eos_name == "md-stiff" || eos_name == "hm" || eos_name == "HM") eos_preset = EOSPreset::MDStiff;
     MeanFieldConfig mf_cfg = make_mean_field_config(eos_preset);
     mf_cfg.coulomb_enabled = (coulomb_override >= 0) ? (coulomb_override == 1) : (mode == "hic");
 
