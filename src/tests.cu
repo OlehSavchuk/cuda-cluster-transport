@@ -1370,6 +1370,61 @@ void test_poisson_coulomb_potential_and_energy_conservation() {
                 phi_c_num * 1e3, phi_c_exact * 1e3, ecoul_num, ecoul_exact, (pr_on - pr_off) * 1e3, dh_on);
 }
 
+void test_grand_canonical_freezeout_sampling() {
+    // Verify GrandCanonical Poisson sampling on sparse 1-fm^3 cells (Bc ~ 3) reproduces exact HRG <B>, <Q>, and 4He!
+    GridConfig gcfg{}; gcfg.boundary = BoundaryMode::PeriodicBox;
+    gcfg.nx = 10; gcfg.ny = 10; gcfg.nz = 10;
+    gcfg.xmin = 0.0; gcfg.xmax = 10.0; gcfg.ymin = 0.0; gcfg.ymax = 10.0; gcfg.zmin = 0.0; gcfg.zmax = 10.0;
+
+    constexpr int NT = 200;
+    constexpr int B_PHYS = 15;  // n_B = 0.015 fm^-3, only 3.0 test-baryons per 1 fm^3 cell!
+    constexpr int Z_PHYS = 6;   // Y_p = 0.40
+    PhiloxRng rng(884422ULL, 0ULL, 0ULL);
+    std::vector<HostParticle> init_p;
+    for (int i = 0; i < B_PHYS * NT; ++i) {
+        HostParticle hp{};
+        hp.species = (i < Z_PHYS * NT) ? PROTON : NEUTRON;
+        hp.mass = get_species_info(hp.species).pole_mass_gev;
+        hp.x = 10.0 * rng.uniform(); hp.y = 10.0 * rng.uniform(); hp.z = 10.0 * rng.uniform();
+        const double qx = std::sqrt(hp.mass * 0.004) * rng.normal();
+        const double qy = std::sqrt(hp.mass * 0.014) * rng.normal();
+        const double qz = std::sqrt(hp.mass * 0.006) * rng.normal();
+        hp.E = std::sqrt(hp.mass * hp.mass + qx * qx + qy * qy + qz * qz);
+        hp.px = qx; hp.py = qy; hp.pz = qz;
+        init_p.push_back(hp);
+    }
+
+    ParticleSystem ps; ps.upload(init_p);
+    FreezeoutConfig fc{};
+    fc.mode = ClusterMode::FreezeoutThermal;
+    fc.sampling = FreezeoutSampling::GrandCanonical;
+    fc.n_fr_fm3 = 0.025;
+    fc.local_anisotropy = true;
+    FreezeoutCellClusterizer clz(fc, gcfg);
+    clz.process_step(ps, 1, 5.0, NT, make_mean_field_config(EOSPreset::MDSoft), 2026ULL, true);
+
+    const auto dec = decay_all_unstable_for_detection(ps.download(), 2026ULL);
+    double b_out = 0.0, q_out = 0.0, n_d = 0.0, n_he4 = 0.0, kxx = 0.0, kyy = 0.0;
+    for (const auto& hp : dec) {
+        const SpeciesInfo sp = get_species_info(hp.species);
+        b_out += sp.baryon_num / static_cast<double>(NT);
+        q_out += sp.charge / static_cast<double>(NT);
+        if (hp.species == DEUTERON) n_d += 1.0 / NT;
+        if (hp.species == ALPHA) n_he4 += 1.0 / NT;
+        if (sp.baryon_num >= 2) {
+            kxx += (hp.px * hp.px) / hp.mass;
+            kyy += (hp.py * hp.py) / hp.mass;
+        }
+    }
+    const double sq_gc = (kyy - kxx) / std::max(kyy + kxx, 1.0e-12);
+    TEST_ASSERT(std::fabs(b_out - B_PHYS) / B_PHYS < 0.05 && std::fabs(q_out - Z_PHYS) / Z_PHYS < 0.06,
+                "GrandCanonical sampling violated ensemble <B> or <Q> consistency");
+    TEST_ASSERT(n_d > 0.6 && n_he4 > 0.8 && sq_gc > 0.25,
+                "GrandCanonical sampling failed cluster yield or Pratt-Torrieri anisotropy transfer on 1 fm^3 cells");
+    std::printf("[PASS] test_grand_canonical_freezeout_sampling (<B>=%.2f/%d, <Q>=%.2f/%d, d=%.2f, 4He=%.2f, eps_cl=%+.3f)\n",
+                b_out, B_PHYS, q_out, Z_PHYS, n_d, n_he4, sq_gc);
+}
+
 }  // namespace
 
 int main() {
@@ -1397,6 +1452,7 @@ int main() {
     test_hcgf_pratt_torrieri_momentum_anisotropy();
     test_pauli_blocking_and_interacting_hcgf();
     test_poisson_coulomb_potential_and_energy_conservation();
+    test_grand_canonical_freezeout_sampling();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

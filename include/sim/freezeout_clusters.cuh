@@ -32,9 +32,15 @@ enum class BackflowMode : int {
     GhostFreeStream = 2    // Diagnostic: no backflow filtering or re-melting
 };
 
+enum class FreezeoutSampling : int {
+    MicrocanonicalParcel = 0,  // Constrained parcel sampling conserving exact integer (B, Q) & 4-momentum P^mu
+    GrandCanonical = 1         // Unconstrained Cooper-Frye Poisson(V_c * n_eq,i) per cell (standard HCGF!)
+};
+
 struct FreezeoutConfig {
     ClusterMode mode = ClusterMode::Microscopic;
     BackflowMode backflow = BackflowMode::RemeltInDense;
+    FreezeoutSampling sampling = FreezeoutSampling::MicrocanonicalParcel;
     double n_fr_fm3 = 0.040;          // Freeze-out Eckart baryon density threshold (~rho_0 / 4) [fm^-3]
     double melt_factor = 1.15;        // Hysteresis ratio n_melt / n_fr for re-entering dense matter
     double min_time_fm = 0.0;         // Minimum time before expansion freeze-out check activates [fm/c]
@@ -575,10 +581,12 @@ public:
                 e_th_gev = 0.5 * ((static_cast<double>(snap.fields[18][c]) / nb_cell) - m_rest_nuc);
             }
             e_th_gev = std::clamp(e_th_gev, -0.0065, 0.120);
-            const double Yp = (Bc >= 2) ? (static_cast<double>(Np) / static_cast<double>(Bc))
-                                        : std::clamp(static_cast<double>(snap.fields[14][c]) /
-                                                     std::max(static_cast<double>(snap.fields[10][c]), 1.0e-8),
-                                                     0.05, 0.95);
+            const bool use_smooth_yp = (cfg_.sampling == FreezeoutSampling::GrandCanonical) || (Bc < 16);
+            const double Yp = (!use_smooth_yp || snap.fields[10][c] <= 1.0e-6f)
+                                  ? (static_cast<double>(Np) / static_cast<double>(Bc))
+                                  : std::clamp(static_cast<double>(snap.fields[14][c]) /
+                                               static_cast<double>(snap.fields[10][c]),
+                                               0.05, 0.95);
 
             double T_gev = 0.0, muB_gev = 0.0, muQ_gev = 0.0, n_eq[NUM_SPECIES] = {};
             fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
@@ -620,6 +628,61 @@ public:
             double nB_hrg = 0.0;
             for (int id = 0; id < NUM_SPECIES; ++id) nB_hrg += get_species_info(id).baryon_num * n_eq[id];
             const double vol_scale = (nB_hrg > 1.0e-12) ? (static_cast<double>(Bc) / nB_hrg) : 0.0;
+
+            if (cfg_.sampling == FreezeoutSampling::GrandCanonical) {
+                double gnx = 0.0, gny = 0.0, gnz = 0.0;
+                mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, gnx, gny, gnz);
+                const bool outward_cut = (!force_finalize && cfg_.backflow == BackflowMode::OutwardOnly);
+                int n_cl_gc = 0, inward_gc = 0;
+                std::size_t slot_cur = 0;
+
+                for (int id = 0; id < NUM_SPECIES; ++id) {
+                    const SpeciesInfo sp = get_species_info(id);
+                    if (sp.baryon_num < 1 || sp.baryon_num > cfg_.max_cluster_A || is_delta(id) || n_eq[id] <= 0.0) {
+                        continue;
+                    }
+                    if (sp.is_excited && !cfg_.include_excited_clusters) continue;
+                    const int n_draw = fo_detail::sample_poisson(vol_scale * n_eq[id], rng);
+                    for (int d = 0; d < n_draw; ++d) {
+                        const double mk = sp.is_excited ? sample_thermal_breit_wigner_mass(id, T_gev, rng)
+                                                        : sp.pole_mass_gev;
+                        const FourVector q = sample_maxwell_juttner(mk, T_gev, rng);
+                        const double pxs = Lambda_cell[0] * q.x + Lambda_cell[1] * q.y + Lambda_cell[2] * q.z;
+                        const double pys = Lambda_cell[3] * q.x + Lambda_cell[4] * q.y + Lambda_cell[5] * q.z;
+                        const double pzs = Lambda_cell[6] * q.x + Lambda_cell[7] * q.y + Lambda_cell[8] * q.z;
+                        const double es = std::sqrt(mk * mk + pxs * pxs + pys * pys + pzs * pzs);
+                        const FourVector plab = lorentz_boost_from_cm(mk, es, pxs, pys, pzs, vx_e, vy_e, vz_e, u0);
+
+                        const double adv = dnb_dt_vec[c] + (plab.x * gnx + plab.y * gny + plab.z * gnz) / plab.t;
+                        if (adv > 0.0) {
+                            ++inward_gc;
+                            if (outward_cut) continue;
+                        }
+
+                        HostParticle hp = host_p[idxs[slot_cur % idxs.size()]];
+                        if (slot_cur >= idxs.size()) {
+                            hp.x = gcfg_.xmin + (ix + rng.uniform()) * gcfg_.dx();
+                            hp.y = gcfg_.ymin + (iy + rng.uniform()) * gcfg_.dy();
+                            hp.z = gcfg_.zmin + (iz + rng.uniform()) * gcfg_.dz();
+                        }
+                        ++slot_cur;
+                        hp.species = id; hp.mass = mk;
+                        hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
+                        hp.collided = 5; hp.freezeout_tag = 1;
+                        spawned.push_back(hp);
+                        if (sp.baryon_num >= 2) ++n_cl_gc;
+                    }
+                }
+                for (std::size_t idx : idxs) remove_mask[idx] = 1;
+                rec.clusters_formed = n_cl_gc;
+                rec.back_emitted = inward_gc;
+                records_.push_back(rec);
+                total_baryons_converted_ += Bc;
+                total_clusters_formed_ += n_cl_gc;
+                back_emitted_total_ += inward_gc;
+                mutated = true;
+                continue;
+            }
 
             ReadyMicroCell mc{};
             mc.cell_id = c; mc.ix = ix; mc.iy = iy; mc.iz = iz;

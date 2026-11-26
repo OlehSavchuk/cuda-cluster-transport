@@ -1,6 +1,6 @@
 # CUDA Relativistic Hadron & Light-Cluster ($A \le 6$) Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-20%2F20%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-22%2F22%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -12,7 +12,14 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### 1. 6D Phase-Space Pauli Blocking $(1 - f_3)(1 - f_4)$ + Downward $n_{\text{fr}} = \rho_0 / 8$ Crossing + Interacting Quantum INCG HCGF
+### 1. Grand-Canonical Poisson HCGF ($\Delta x = 1.0\;\text{fm}$) + 3D Coulomb + Exact $T^{00}$ Potential vs. FOPI Data
+High-statistics FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ benchmark (`scripts/run_gc_dx1fm_benchmark.py`, `--box 68 --grid 68 --sampling gc --coulomb on --pauli on`) showing how $\Delta x = 1.0\;\text{fm}$ coarse-graining removes sub-cell Hubble shear smearing (cooling $\langle T_{\text{fr}} \rangle$ from $14.3\;\text{MeV} \to 9.5\;\text{MeV}$) and how **Grand-Canonical Poisson particlization (`--sampling gc`)** brings $p, d, t, {}^3\text{He}$ yields, $v_1(y_0)$, and squeeze-out $v_2(u_{t0})$ into close agreement with published FOPI data:
+
+<p align="center">
+  <img src="assets/fopi_gc_dx1fm_benchmark.png" alt="Grand-Canonical Poisson HCGF dx=1.0 fm + 3D Coulomb Benchmark vs FOPI" width="100%">
+</p>
+
+### 2. 6D Phase-Space Pauli Blocking $(1 - f_3)(1 - f_4)$ + Downward $n_{\text{fr}} = \rho_0 / 8$ Crossing + Interacting Quantum INCG HCGF
 High-statistics (`16,000` $\text{Au}+\text{Au}$ events, `scripts/run_pauli_hcgf_benchmark.py`) FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ benchmark showing how 6D phase-space Pauli blocking, downward post-compression freeze-out crossing ($dn_B/dt \le 0$), and matching the interacting Eckart energy $e_{\text{tr}} = e_{\text{kin}}^* + V_{\text{pot}}/n_B$ to the quantum Fermi–Dirac / Bose–Einstein INCG EoS cool $\langle T_{\text{fr}} \rangle$ from $22.1\;\text{MeV} \to 14.5\;\text{MeV}$ and boost heavy clusters (${}^4\text{He}, {}^6\text{He}, {}^6\text{Li}$, $t$, ${}^3\text{He}$):
 
 <p align="center">
@@ -305,6 +312,7 @@ python3 scripts/generate_animations.py
 19. **`test_hcgf_pratt_torrieri_momentum_anisotropy`**: Verifies exact Lorentz projection of boosted $3\times 3$ shear stress tensors $P_{ij}^*$, exact volume preservation $\det\Lambda = 1$ (`1.000000`) and cluster multiplicity invariance, and transfer of local rest-frame squeeze-out anisotropy onto $A \ge 2$ clusters (`eps_cl: -0.057 -> +0.584`) with $|\Delta E|/E < 10^{-12}$.
 20. **`test_pauli_blocking_and_interacting_hcgf`**: Verifies 6D phase-space occupancy (`f_core = 0.98`), `87.8%` Pauli suppression of cold intra-nuclear ${}^{197}\text{Au}$ Fermi-sea collisions, and quantum Fermi–Dirac / Bose–Einstein INCG EoS inversion (`T_fr = 7.71 MeV`, `${}^4\text{He} = 21.8` at $e_{\text{tr}} = +2\;\text{MeV}/B$).
 21. **`test_poisson_coulomb_potential_and_energy_conservation`**: Verifies 3D separable spectral Poisson electrostatic solver (`include/physics/coulomb_poisson.cuh`) with $\ell \le 2$ multipole open-boundary conditions against an analytical $Z=79$ sphere ($\Phi_C(0) = 24.51/25.09\;\text{MeV}$, $E_{\text{Coul}} = 0.777/0.793\;\text{GeV}$), outward Coulomb proton radial impulse, and symplectic Hamiltonian conservation ($|\Delta H|/H = 1.51 \times 10^{-4}$, $|\Delta\vec{P}| < 10^{-11}\;\text{GeV}/c$).
+22. **`test_grand_canonical_freezeout_sampling`**: Verifies unconstrained Cooper–Frye `GrandCanonical` Poisson sampling (`--sampling gc`) on sparse $1\;\text{fm}^3$ cells, confirming ensemble $\langle B \rangle, \langle Q \rangle$ consistency, $d/{}^4\text{He}$ production, and Pratt–Torrieri local momentum-anisotropy transfer.
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering, Breit–Wigner spectral functions, and $2 \leftrightarrow 1$ / $2 \leftrightarrow 2$ detailed balance across **58 species** ($p, n, \pi, \Delta(1232)$, bound $d, t, {}^3\text{He}, {}^4\text{He}, {}^6\text{He}, {}^6\text{Li}$, and 43 TUNL $A=2,4,5,6$ resonances)

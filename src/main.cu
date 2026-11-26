@@ -353,6 +353,7 @@ int main(int argc, char** argv) {
     int dump_tmunu_every = 5;
     std::string cluster_mode_str = "freezeout";
     std::string backflow_str = "remelt";
+    std::string sampling_str = "parcel";
     bool local_anisotropy = true;
     int pauli_override = -1;    // -1: auto (ON in hic mode, OFF in classical box modes); 0: OFF; 1: ON
     int coulomb_override = -1;  // -1: auto (ON in hic mode, OFF in box modes); 0: OFF; 1: ON
@@ -406,6 +407,8 @@ int main(int argc, char** argv) {
             cluster_mode_str = next_str();
         } else if (arg == "--backflow") {
             backflow_str = next_str();
+        } else if (arg == "--sampling" || arg == "--fo-sampling") {
+            sampling_str = next_str();
         } else if (arg == "--anisotropy" || arg == "--local-anisotropy") {
             const std::string v = next_str();
             local_anisotropy = (v == "on" || v == "1" || v == "true" || v == "pt");
@@ -624,6 +627,11 @@ int main(int argc, char** argv) {
     if (backflow_str == "outward") fo_cfg.backflow = BackflowMode::OutwardOnly;
     else if (backflow_str == "ghost") fo_cfg.backflow = BackflowMode::GhostFreeStream;
     else fo_cfg.backflow = BackflowMode::RemeltInDense;
+    if (sampling_str == "gc" || sampling_str == "grand-canonical" || sampling_str == "grand") {
+        fo_cfg.sampling = FreezeoutSampling::GrandCanonical;
+    } else {
+        fo_cfg.sampling = FreezeoutSampling::MicrocanonicalParcel;
+    }
     fo_cfg.n_fr_fm3 = nfr_fm3;
     fo_cfg.max_cluster_A = max_cluster_A;
     fo_cfg.local_anisotropy = local_anisotropy;
