@@ -19,6 +19,12 @@ High-statistics (`6,400` $\text{Au}+\text{Au}$ events, `scripts/run_auau1200_ben
   <img src="assets/fopi_auau1200_sm_vs_hm.png" alt="FOPI Au+Au 1.2 A GeV SM vs HM Grand-Canonical HCGF Benchmark" width="100%">
 </p>
 
+**1 Single BUU Run (`N_test = 80`) + $50\times$ Freeze-Out Oversampling (`--fo-oversample 50`, systematic backflow resampling to $N_{\text{test}}$ + Mott remelting)**: Adds only `+12%` runtime (`133s` vs. `119s`) while delivering `4,000` effective cluster events (`30,334` oversampled backflow copies thinned to `461` reabsorbed nucleons + `143` remelted clusters) and resolving smooth $A = 1 \dots 6$ flow including rare ${}^6\text{He}$ and ${}^6\text{Li}$:
+
+<p align="center">
+  <img src="assets/fopi_auau1200_single_buu_oversample.png" alt="Single BUU Run + 50x Freeze-Out Oversampling with Backflow Remelting" width="100%">
+</p>
+
 ### 2. Grand-Canonical Poisson HCGF ($\Delta x = 1.0\;\text{fm}$) + 3D Coulomb + Exact $T^{00}$ Potential vs. FOPI $0.25\,A\;\text{GeV}$ Data
 High-statistics FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ benchmark (`scripts/run_gc_dx1fm_benchmark.py`, `--box 68 --grid 68 --sampling gc --coulomb on --pauli on`) showing how $\Delta x = 1.0\;\text{fm}$ coarse-graining removes sub-cell Hubble shear smearing (cooling $\langle T_{\text{fr}} \rangle$ from $14.3\;\text{MeV} \to 9.5\;\text{MeV}$) and how **Grand-Canonical Poisson particlization (`--sampling gc`)** brings $p, d, t, {}^3\text{He}$ yields, $v_1(y_0)$, and squeeze-out $v_2(u_{t0})$ into close agreement with published FOPI data:
 

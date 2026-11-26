@@ -560,10 +560,16 @@ public:
             const double P2 = Pxc * Pxc + Pyc * Pyc + Pzc * Pzc;
             const double m_rest_nuc = Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON;
 
-            // Exact baryon Eckart collective velocity u^mu = J_B^mu / n_B of cell c's own baryons
+            // In Grand-Canonical mode on sparse 1-fm^3 cells (Bc < 16), evaluate both rest-frame thermal
+            // energy and cluster boosts in the smooth coarse-grained Eckart fluid frame (eliminates (Bc-1)/Bc bias!)
             double vx_e = jbx_c / static_cast<double>(Bc);
             double vy_e = jby_c / static_cast<double>(Bc);
             double vz_e = jbz_c / static_cast<double>(Bc);
+            if (cfg_.sampling == FreezeoutSampling::GrandCanonical && Bc < 16 && snap.fields[10][c] > 1.0e-5f) {
+                vx_e = snap.fields[21][c];
+                vy_e = snap.fields[22][c];
+                vz_e = snap.fields[23][c];
+            }
             const double ve2 = std::min(0.9990, vx_e * vx_e + vy_e * vy_e + vz_e * vz_e);
             const double u0 = 1.0 / std::sqrt(1.0 - ve2);
             const double ux = u0 * vx_e, uy = u0 * vy_e, uz = u0 * vz_e;
@@ -597,8 +603,7 @@ public:
             const double E_floor = std::sqrt(P2 + (0.992 * m_rest_nuc) * (0.992 * m_rest_nuc));
             const double Ec_t00 = mf_cfg.enabled ? std::max(E_floor, Ec + e_pot_cell_gev) : Ec;
             double e_th_gev = (u0 * Ec_t00 - (Pxc * ux + Pyc * uy + Pzc * uz) - m_rest_nuc) / static_cast<double>(Bc);
-            // Only for single-particle cells (Bc == 1, zero internal variance), estimate thermal energy from local T^munu
-            if (Bc == 1 && nb_cell > 1.0e-5 && snap.fields[18][c] > 0.0f) {
+            if (cfg_.sampling != FreezeoutSampling::GrandCanonical && Bc == 1 && nb_cell > 1.0e-5 && snap.fields[18][c] > 0.0f) {
                 e_th_gev = 0.5 * ((static_cast<double>(snap.fields[18][c]) / nb_cell) - m_rest_nuc);
             }
             e_th_gev = std::clamp(e_th_gev, -0.0065, 0.350);
