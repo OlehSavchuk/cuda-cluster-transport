@@ -1,6 +1,6 @@
 # CUDA Relativistic Nucleon & Light-Cluster Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-15%2F15%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-17%2F17%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -12,7 +12,14 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### 1. FOPI Heavy-Ion Benchmark: $\text{Au} + \text{Au}$ @ $250\,A\;\text{MeV}$ (`--mode hic`, `--dump-hydro-dir`)
+### 1. Microscopic Dynamical Clusters vs. Pure $N+\Delta+\pi$ + HCGF $T^{\mu\nu}$ Grid Freeze-Out ($n_B < n_{\text{fr}}$)
+Direct side-by-side comparison (`scripts/compare_microscopic_vs_hcgf_freezeout.py`) in FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ (`MD-Soft`) between **full microscopic dynamical cluster transport** (`--cluster-mode microscopic`) and **pure hadronic ($N + \Delta + \pi$) transport** with 24-field `HCGF` stress-energy tensor $T^{\mu\nu}$ export (`--dump-tmunu-dir`) and conservative local thermal clusterization in grid cells crossing $n_{B,\text{LRF}} < n_{\text{fr}}$ (`--cluster-mode freezeout --nfr 0.04`):
+
+<p align="center">
+  <img src="assets/hcgf_vs_microscopic_comparison.png" alt="Microscopic Dynamical Clusters vs HCGF Tmunu Grid Freeze-Out Clusters" width="100%">
+</p>
+
+### 2. FOPI Heavy-Ion Benchmark: $\text{Au} + \text{Au}$ @ $250\,A\;\text{MeV}$ (`--mode hic`, `--dump-hydro-dir`)
 Semi-central ${}^{197}\text{Au} + {}^{197}\text{Au}$ collision at $E_{\text{lab}} = 250\,A\;\text{MeV}$ ($b = 5.5\;\text{fm}$, equal-velocity CM rapidity $y_{\text{beam}} = \pm 0.3572$, `MD-Soft` Skyrme + Lorentzian momentum-dependent potential). Two Woods–Saxon + local Thomas–Fermi nuclei compress to $\max(n_B / \rho_0) \approx 1.80$ with local excitation energy density $\varepsilon_{\text{LRF}} - m_N n_B \approx 60\;\text{MeV}/\text{fm}^3$, exhibiting in-plane spectator bounce-off ($v_1$), midrapidity out-of-plane squeeze-out ($v_2 < 0$), and abundant light-cluster production ($d, t, {}^3\text{He}, {}^4\text{He}$):
 
 <p align="center">
@@ -160,18 +167,31 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 │       ├── stepper.cuh             # Symplectic Strang-split Vlasov + decay + stochastic collisions
 │       ├── init_conditions.cuh     # Woods-Saxon + Thomas-Fermi HIC, grand-canonical & fireball
 │       ├── hydro_io.cuh            # Binary 3D local energy & baryon density grid writer ("CHYD")
+│       ├── hcgf_io.cuh             # 24-field HCGF T^munu + J_B^mu + J_Q^mu + Landau frame exporter
+│       ├── freezeout_clusters.cuh  # Grid cell n_B < n_fr tracker & conservative thermal clusterizer
 │       ├── flow_observables.cuh    # Freeze-out resonance decay & FOPI dN/dy, v1, v2 calculator
 │       └── observables.cuh         # Parallel GPU reductions for P^mu, B, Q, T^ij & mass moments
 ├── src/
-│   ├── main.cu                     # CLI simulation driver, CSV logger & binary CHYD/CTR2 exporters
-│   └── tests.cu                    # Automated physics, Vlasov, HIC & detailed-balance suite
+│   ├── main.cu                     # CLI simulation driver, CSV logger & binary HCGF/CHYD exporters
+│   └── tests.cu                    # Automated physics, Vlasov, HCGF & detailed-balance suite
 ├── scripts/
+│   ├── compare_microscopic_vs_hcgf_freezeout.py
+│   ├── generate_pion_delta_physics.py
 │   ├── generate_auau_fopi_plots.py # FOPI Au+Au 250 AMeV 3D+hydro animation & v1/v2/dNdy plots
 │   ├── generate_meanfield_animations.py
 │   ├── generate_inelastic_animations.py
 │   └── generate_animations.py      # Reproduces all GIF/MP4 animations and physics figures
 └── assets/                         # Rendered animations and spectral/cross-section plots
 ```
+
+### Binary 3D Stress-Energy Tensor Format for HCGF (`HCGF`)
+Passing `--dump-tmunu-dir <dir> --dump-tmunu-every <N>` writes self-describing binary 3D grid files `tmunu_grid_XXXX.bin` (`include/sim/hcgf_io.cuh`):
+- **88-byte header (`HcgfTmunuHeader`)**: `uint32 magic = 0x46474348 ("HCGF")`, `int32 version=1, step, nx, ny, nz, n_fields=24, reserved`, `float64 t_fm, xmin, xmax, ymin, ymax, zmin, zmax`.
+- **24 contiguous `float32` 3D arrays** of shape `(nz, ny, nx)`:
+  - `[0..9]`: Symmetric $T^{\mu\nu}$ (`T00, T0x, T0y, T0z, Txx, Txy, Txz, Tyy, Tyz, Tzz` in $\text{GeV}/\text{fm}^3$, kinetic + covariant Skyrme/MD interaction tensor).
+  - `[10..13]`: Baryon 4-current $J_B^\mu$ (`JB0, JBx, JBy, JBz` in $\text{fm}^{-3}$).
+  - `[14..17]`: Electric charge 4-current $J_Q^\mu$ (`JQ0, JQx, JQy, JQz` in $\text{fm}^{-3}$).
+  - `[18..23]`: Exact Landau rest-frame fields (`eps_LRF, P_LRF` in $\text{GeV}/\text{fm}^3$, `nB_LRF` in $\text{fm}^{-3}$, `vx_L, vy_L, vz_L` in $c$).
 
 ### Binary 3D Local Energy & Baryon Density Format (`CHYD`)
 Passing `--dump-hydro-dir <dir> --dump-hydro-every <N>` writes self-describing binary 3D grid files `hydro_grid_XXXX.bin` (`include/sim/hydro_io.cuh`):
@@ -250,6 +270,8 @@ python3 scripts/generate_animations.py
 13. **`test_in_medium_collision_energy_conservation`**: Verifies `--in-medium-ec <off|on|exact>` across coupled $2\leftrightarrow 2$ and $2\leftrightarrow 1$ reactions under `MDStiff`, reducing $|\Delta H|/H$ from $1.93 \times 10^{-3}$ (`off`) $\to 2.32 \times 10^{-5}$ (`on`, per-vertex quasi-energy root solver) $\to 1.86 \times 10^{-14}$ (`exact`, + Hamiltonian manifold projection).
 14. **`test_pion_delta_cross_sections_and_detailed_balance`**: Verifies PDG $\pi^+ p \to \Delta^{++}$ (`192.8 mb`) & $\pi^- p \to \Delta^0$ (`64.2 mb`) $3:1$ Clebsch–Gordan cross sections and grand-canonical $\pi\text{–}\Delta\text{–}N\text{–}d$ detailed balance with exact signed electric charge ($\Delta Q = 0$) conservation.
 15. **`test_hic_pion_and_delta_production`**: Verifies dynamical $\Delta(1232)$ excitation, $\pi^-/\pi^+$ neutron-rich isospin asymmetry, and machine-precision Hamiltonian conservation (`|dH|/H = 1.24e-15`) in $\text{Au}+\text{Au}$ @ $800\,A\;\text{MeV}$.
+16. **`test_hcgf_tmunu_and_landau_frame`**: Verifies 24-field `HCGF` $T^{\mu\nu} + J_B^\mu + J_Q^\mu$ grid conservation ($\int T^{00} d^3x = E$, $\int T^{0z} d^3x = P_z$) and exact relativistic Landau 4-velocity recovery.
+17. **`test_pure_hadron_and_grid_freezeout_clusters`**: Verifies cluster-free pure $N+\Delta+\pi$ transport (`--cluster-mode none`) and conservative $n_B < n_{\text{fr}}$ local thermal clusterization (`--cluster-mode freezeout`, $|\Delta E|/E = 6.91 \times 10^{-15}$, $\Delta B = \Delta Q = 0$).
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA

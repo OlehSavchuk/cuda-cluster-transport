@@ -15,7 +15,9 @@
 #include "physics/resonances.cuh"
 #include "physics/species.cuh"
 #include "sim/flow_observables.cuh"
+#include "sim/freezeout_clusters.cuh"
 #include "sim/grid.cuh"
+#include "sim/hcgf_io.cuh"
 #include "sim/hydro_io.cuh"
 #include "sim/init_conditions.cuh"
 #include "sim/observables.cuh"
@@ -898,9 +900,134 @@ void test_hic_pion_and_delta_production() {
                 "Baryon or signed electric charge violated in Au+Au pion production");
     TEST_ASSERT(std::fabs(H1 - H0) / std::fabs(H0) < 1.0e-11,
                 "Exact MD Hamiltonian conservation violated with active Delta/pion production");
-    std::printf("[PASS] test_hic_pion_and_delta_production (peak Delta=%d, freeze-out pi-=%d, pi0=%d, pi+=%d, pi-/pi+=%.2f, |dH|/H=%.2e)\n",
+    std::printf("[PASS] test_hic_pion_and_delta_production (peak Delta=%d, freeze-out pi-=%.0d, pi0=%d, pi+=%d, pi-/pi+=%.2f, |dH|/H=%.2e)\n",
                 peak_delta, n_pim, n_pi0, n_pip, static_cast<double>(n_pim) / (n_pip > 0 ? n_pip : 1),
                 std::fabs(H1 - H0) / std::fabs(H0));
+}
+
+void test_hcgf_tmunu_and_landau_frame() {
+    GridConfig gcfg{};
+    gcfg.boundary = BoundaryMode::PeriodicBox;
+    gcfg.nx = 8; gcfg.ny = 8; gcfg.nz = 8;
+    gcfg.xmin = 0.0; gcfg.xmax = 16.0;
+    gcfg.ymin = 0.0; gcfg.ymax = 16.0;
+    gcfg.zmin = 0.0; gcfg.zmax = 16.0;
+
+    MixtureConfig mix{};
+    mix.include_ground_clusters = false;
+    mix.include_excited_dstar = false;
+    mix.include_excited_he4 = false;
+    mix.include_pions = true;
+    mix.include_deltas = true;
+
+    const int n_test = 20;
+    auto host_p = init_box_ensemble(12000, gcfg, 0.080, 0.080, 0.780, -0.010, mix, 6161ULL);
+    const double bx = 0.28, by = -0.18, bz = 0.42;
+    const double bmag = std::sqrt(bx * bx + by * by + bz * bz);
+    const double gam = 1.0 / std::sqrt(1.0 - bmag * bmag);
+    double E_sum = 0.0, Pz_sum = 0.0, B_sum = 0.0, Q_sum = 0.0;
+    for (std::size_t idx = 0; idx < host_p.size(); ++idx) {
+        auto& hp = host_p[idx];
+        PhiloxRng jr(9090ULL, 1ULL, idx);
+        // Sample equal-lab-time relativistic Juttner distribution dN ~ (u_mu p^mu / u^0) exp(-u.p/T) d^3p/E
+        FourVector p_cm{};
+        while (true) {
+            p_cm = sample_maxwell_juttner(hp.mass, 0.080, jr);
+            const double b_dot_v = (bx * p_cm.x + by * p_cm.y + bz * p_cm.z) / p_cm.t;
+            if (jr.uniform() * (1.0 + bmag) <= (1.0 + b_dot_v)) break;
+        }
+        const FourVector plab = lorentz_boost_from_cm(hp.mass, p_cm.t, p_cm.x, p_cm.y, p_cm.z, bx, by, bz, gam);
+        hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
+        const SpeciesInfo sp = get_species_info(hp.species);
+        E_sum += hp.E / n_test; Pz_sum += hp.pz / n_test;
+        B_sum += static_cast<double>(sp.baryon_num) / n_test;
+        Q_sum += static_cast<double>(sp.charge) / n_test;
+    }
+
+    const MeanFieldConfig mf_off = make_mean_field_config(EOSPreset::None);
+    const HcgfGridSnapshot snap = compute_hcgf_tmunu_snapshot(n_test, gcfg, mf_off, host_p);
+    const std::string tmp_dir = "/tmp/test_hcgf_tmunu";
+    write_hcgf_tmunu_binary(tmp_dir, 0, 0, 0.0, gcfg, snap);
+    std::ifstream in(tmp_dir + "/tmunu_grid_0000.bin", std::ios::binary);
+    HcgfTmunuHeader hdr{};
+    in.read(reinterpret_cast<char*>(&hdr), sizeof(HcgfTmunuHeader));
+    in.close();
+    std::filesystem::remove_all(tmp_dir);
+    TEST_ASSERT(hdr.magic == 0x46474348U && hdr.n_fields == 24, "Invalid HCGF T^munu binary header");
+
+    const double dV = gcfg.cell_volume_fm3();
+    const int nc = gcfg.num_cells();
+    double iT00 = 0.0, iT0z = 0.0, iJB0 = 0.0, iJQ0 = 0.0, vx_avg = 0.0, vy_avg = 0.0, vz_avg = 0.0;
+    for (int c = 0; c < nc; ++c) {
+        iT00 += snap.fields[0][c] * dV; iT0z += snap.fields[3][c] * dV;
+        iJB0 += snap.fields[10][c] * dV; iJQ0 += snap.fields[14][c] * dV;
+        vx_avg += snap.fields[21][c] / nc; vy_avg += snap.fields[22][c] / nc; vz_avg += snap.fields[23][c] / nc;
+    }
+    TEST_ASSERT(std::fabs(iT00 - E_sum) / E_sum < 1.0e-3 && std::fabs(iT0z - Pz_sum) / Pz_sum < 1.0e-3,
+                "Integrated T^00 or T^0z mismatch vs exact particle 4-momentum");
+    TEST_ASSERT(std::fabs(iJB0 - B_sum) / B_sum < 1.0e-3 && std::fabs(iJQ0 - Q_sum) < 5.0e-2,
+                "Integrated J_B^0 or J_Q^0 mismatch");
+    TEST_ASSERT(std::fabs(vx_avg - bx) < 0.015 && std::fabs(vy_avg - by) < 0.015 && std::fabs(vz_avg - bz) < 0.015,
+                "Landau 4-velocity solver failed to recover relativistic frame boost");
+    std::printf("[PASS] test_hcgf_tmunu_and_landau_frame (int T00=%.2f/%.2f GeV, v_L=(%.3f,%.3f,%.3f) vs (%.2f,%.2f,%.2f))\n",
+                iT00, E_sum, vx_avg, vy_avg, vz_avg, bx, by, bz);
+}
+
+void test_pure_hadron_and_grid_freezeout_clusters() {
+    double y_cm = 0.0;
+    const int A_nuc = 197, Z_nuc = 79, n_test = 20;
+    const auto hic_init = init_heavy_ion_collision(A_nuc, Z_nuc, n_test, 250.0, 5.5, 3030ULL, y_cm);
+
+    GridConfig gcfg{};
+    gcfg.boundary = BoundaryMode::OpenExpanding;
+    gcfg.nx = 16; gcfg.ny = 16; gcfg.nz = 16;
+    gcfg.xmin = -24.0; gcfg.xmax = 24.0;
+    gcfg.ymin = -24.0; gcfg.ymax = 24.0;
+    gcfg.zmin = -24.0; gcfg.zmax = 24.0;
+
+    auto run_mode = [&](ClusterMode cmode, int& out_d, int& out_a34, double& out_rel_dE, double& out_dP) {
+        ParticleSystem ps; ps.upload(hic_init);
+        SpatialGrid sg(gcfg);
+        MeanFieldConfig mf_off = make_mean_field_config(EOSPreset::None);
+        StepperConfig sc{}; sc.dt_fm = 0.30; sc.n_test = n_test; sc.collision_substeps = 2;
+        ReactionConfig rc{}; rc.enable_nuclear_clusters = (cmode == ClusterMode::Microscopic);
+        TransportStepper stp(sc, CrossSectionConfig{}, rc);
+        FreezeoutConfig fc{}; fc.mode = cmode; fc.n_fr_fm3 = 0.045; fc.min_time_fm = 25.0;
+        FreezeoutCellClusterizer foc(fc, gcfg);
+        ObservableCalculator oc;
+
+        const GlobalObservables o0 = oc.compute(ps);
+        for (int s = 1; s <= 150; ++s) {
+            stp.step(ps, sg);
+            if (cmode != ClusterMode::Microscopic && (s % 4 == 0 || s == 150)) {
+                foc.process_step(ps, s, s * sc.dt_fm, n_test, mf_off, sc.seed, /*force_finalize=*/(s == 150));
+            }
+        }
+        const GlobalObservables o1 = oc.compute(ps);
+        TEST_ASSERT(o1.baryon_tot == o0.baryon_tot && o1.charge_tot == o0.charge_tot,
+                    "Baryon or charge conservation violated in freeze-out cluster mode");
+        out_rel_dE = std::fabs(o1.E_tot - o0.E_tot) / o0.E_tot;
+        out_dP = std::sqrt((o1.Px_tot - o0.Px_tot) * (o1.Px_tot - o0.Px_tot) +
+                           (o1.Py_tot - o0.Py_tot) * (o1.Py_tot - o0.Py_tot) +
+                           (o1.Pz_tot - o0.Pz_tot) * (o1.Pz_tot - o0.Pz_tot));
+        const auto det = decay_all_unstable_for_detection(ps.download(), sc.seed);
+        out_d = 0; out_a34 = 0;
+        for (const auto& hp : det) {
+            if (hp.species == DEUTERON) ++out_d;
+            else if (hp.species == TRITON || hp.species == HELION || hp.species == ALPHA) ++out_a34;
+        }
+    };
+
+    int d_none = 0, a_none = 0, d_fo = 0, a_fo = 0;
+    double dE_none = 0.0, dP_none = 0.0, dE_fo = 0.0, dP_fo = 0.0;
+    run_mode(ClusterMode::None, d_none, a_none, dE_none, dP_none);
+    run_mode(ClusterMode::FreezeoutThermal, d_fo, a_fo, dE_fo, dP_fo);
+
+    TEST_ASSERT(d_none == 0 && a_none == 0, "Expected ZERO nuclear clusters in pure N+Delta+pi mode");
+    TEST_ASSERT(d_fo > 150 && a_fo > 30, "Expected abundant thermal d, t, 3He, 4He from n < n_fr freeze-out cells");
+    TEST_ASSERT(dE_fo < 1.0e-11 && dP_fo < 1.0e-10, "4-momentum violated in n < n_fr cell thermal clusterization");
+    std::printf("[PASS] test_pure_hadron_and_grid_freezeout_clusters (pure N+Delta+pi: cl=0 | n<n_fr thermal: d=%d, A3+4=%d, |dE|/E=%.2e, |dP|=%.2e)\n",
+                d_fo, a_fo, dE_fo, dP_fo);
 }
 
 }  // namespace
@@ -924,6 +1051,8 @@ int main() {
     test_in_medium_collision_energy_conservation();
     test_pion_delta_cross_sections_and_detailed_balance();
     test_hic_pion_and_delta_production();
+    test_hcgf_tmunu_and_landau_frame();
+    test_pure_hadron_and_grid_freezeout_clusters();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

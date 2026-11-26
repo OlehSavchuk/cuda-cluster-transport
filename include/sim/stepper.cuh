@@ -24,6 +24,7 @@ struct ReactionConfig {
     bool enable_elastic = true;
     bool enable_inelastic_2to2 = true;
     bool enable_resonance_2to1_and_decays = true;
+    bool enable_nuclear_clusters = true;  // False -> pure N + Delta(1232) + pi transport!
     double inelastic_scale = 1.0;
     SpectralNormTable norms{};
 };
@@ -122,6 +123,13 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
     const int id1 = p.species[idx1];
     const int id2 = p.species[idx2];
 
+    // In pure N + Delta + pi mode (or after n < n_fr statistical particlization),
+    // freeze-out-spawned clusters (A >= 2) stream freely without microscopic breakup/scattering
+    if (!rxn_cfg.enable_nuclear_clusters &&
+        (get_species_info(id1).baryon_num >= 2 || get_species_info(id2).baryon_num >= 2)) {
+        return 0;
+    }
+
     // 1. Elastic 2 -> 2 v_moller * sigma_el [fm^2]
     const double w_el = rxn_cfg.enable_elastic
                             ? (kin.v_moller * elastic_cross_section_fm2(id1, id2, kin, xs_cfg))
@@ -136,6 +144,7 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
 
     if (rxn_cfg.enable_inelastic_2to2) {
         for (int ch = 0; ch < NUM_INELASTIC_2TO2_CHANNELS; ++ch) {
+            if (!rxn_cfg.enable_nuclear_clusters && channel_involves_nuclear_cluster(ch)) continue;
             int o3 = -1, o4 = -1;
             const double w = inelastic_2to2_vmoller_sigma_fm2(
                 ch, id1, id2, p1_in, p2_in, kin.sqrt_s,
@@ -179,7 +188,7 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
                         ++n_form;
                     }
                 }
-            } else if (B_tot == 2) {
+            } else if (rxn_cfg.enable_nuclear_clusters && B_tot == 2) {
                 int cand = -1;
                 if (Z_tot == 0) cand = D_STAR_NN;
                 else if (Z_tot == 1) cand = D_STAR_PN;
@@ -194,7 +203,7 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
                         ++n_form;
                     }
                 }
-            } else if (B_tot == 4) {
+            } else if (rxn_cfg.enable_nuclear_clusters && B_tot == 4) {
                 if (Z_tot == 2) {
                     for (int r = HE4_2021; r <= HE4_2989; ++r) {
                         const double w = formation_vmoller_sigma_fm2(
@@ -509,6 +518,7 @@ HD_INLINE bool try_resonance_decay(ParticleSoAView& p,
     p.pz[slot_b] = pb_out.z;
     p.cell_id[slot_b] = -1;
     p.collided[slot_b] = 4;
+    p.freezeout_tag[slot_b] = p.freezeout_tag[i];
 
     return true;
 }

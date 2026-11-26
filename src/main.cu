@@ -17,7 +17,9 @@
 #include "physics/resonances.cuh"
 #include "physics/species.cuh"
 #include "sim/flow_observables.cuh"
+#include "sim/freezeout_clusters.cuh"
 #include "sim/grid.cuh"
+#include "sim/hcgf_io.cuh"
 #include "sim/hydro_io.cuh"
 #include "sim/init_conditions.cuh"
 #include "sim/observables.cuh"
@@ -278,6 +280,14 @@ void print_usage(const char* prog) {
         "  --flow-csv <path>                  Write FOPI rapidity dN/dy, v1, v2 table to CSV\n"
         "  --dump-hydro-dir <dir>             Write binary 3D energy & baryon density grids\n"
         "  --dump-hydro-every <int>           Steps between binary hydro grid dumps (default: 5)\n"
+        "  --dump-tmunu-dir <dir>             Write 24-field HCGF T^munu + J_B^mu + J_Q^mu binary grids\n"
+        "  --dump-tmunu-every <int>           Steps between HCGF T^munu dumps (default: 5)\n"
+        "  --cluster-mode <microscopic|none|freezeout>\n"
+        "                                     Cluster treatment: dynamical, pure N+Delta+pi, or n<nfr thermal\n"
+        "  --nfr <float>                      Freeze-out proper baryon density n_fr [fm^-3] (default: 0.04)\n"
+        "  --freezeout-every <int>            Steps between n<nfr cell checks (default: 2)\n"
+        "  --freezeout-tmin <float>           Min time before n<nfr check [fm/c] (<0: auto overlap time)\n"
+        "  --freezeout-cells-csv <path>       Write HCGF n<nfr freeze-out hypersurface cells to CSV\n"
         "  --reactions <all|elastic>          Enable full inelastic+BW network or elastic only\n"
         "  --eos <none|skyrme-soft|md-soft|md-stiff>\n"
         "                                     Mean-field EOS + MD potential (default: none)\n"
@@ -337,6 +347,13 @@ int main(int argc, char** argv) {
     std::string flow_csv_path;
     std::string dump_hydro_dir;
     int dump_hydro_every = 5;
+    std::string dump_tmunu_dir;
+    int dump_tmunu_every = 5;
+    std::string cluster_mode_str = "freezeout";
+    double nfr_fm3 = 0.040;
+    int freezeout_every = 2;
+    double freezeout_tmin = -1.0;
+    std::string freezeout_cells_csv;
     std::string csv_path;
     std::string dump_dir;
     int dump_every = 1;
@@ -374,6 +391,20 @@ int main(int argc, char** argv) {
             dump_hydro_dir = next_str();
         } else if (arg == "--dump-hydro-every") {
             dump_hydro_every = std::stoi(next_str());
+        } else if (arg == "--dump-tmunu-dir") {
+            dump_tmunu_dir = next_str();
+        } else if (arg == "--dump-tmunu-every") {
+            dump_tmunu_every = std::stoi(next_str());
+        } else if (arg == "--cluster-mode") {
+            cluster_mode_str = next_str();
+        } else if (arg == "--nfr") {
+            nfr_fm3 = std::stod(next_str());
+        } else if (arg == "--freezeout-every") {
+            freezeout_every = std::stoi(next_str());
+        } else if (arg == "--freezeout-tmin") {
+            freezeout_tmin = std::stod(next_str());
+        } else if (arg == "--freezeout-cells-csv") {
+            freezeout_cells_csv = next_str();
         } else if (arg == "--reactions") {
             rxn_mode = next_str();
         } else if (arg == "--eos") {
@@ -475,10 +506,18 @@ int main(int argc, char** argv) {
     step_cfg.n_test = n_test;
     step_cfg.collision_substeps = substeps;
 
+    ClusterMode cluster_mode = ClusterMode::FreezeoutThermal;
+    if (cluster_mode_str == "microscopic" || cluster_mode_str == "micro") {
+        cluster_mode = ClusterMode::Microscopic;
+    } else if (cluster_mode_str == "none" || cluster_mode_str == "hcgf") {
+        cluster_mode = ClusterMode::None;
+    }
+
     ReactionConfig rxn_cfg{};
     rxn_cfg.enable_elastic = true;
     rxn_cfg.enable_inelastic_2to2 = (rxn_mode != "elastic");
     rxn_cfg.enable_resonance_2to1_and_decays = (rxn_mode != "elastic");
+    rxn_cfg.enable_nuclear_clusters = (cluster_mode == ClusterMode::Microscopic);
     rxn_cfg.inelastic_scale = inelastic_scale;
 
     GridConfig gcfg{};
@@ -489,6 +528,11 @@ int main(int argc, char** argv) {
     MixtureConfig mix{};
     mix.include_pions = init_thermal_pions;
     mix.include_deltas = init_thermal_pions;
+    if (cluster_mode != ClusterMode::Microscopic) {
+        mix.include_ground_clusters = false;
+        mix.include_excited_dstar = false;
+        mix.include_excited_he4 = false;
+    }
     mix.use_breit_wigner = (rxn_mode != "elastic");
     mix.cluster_yield_boost = cluster_boost;
     mix.excited_yield_boost = excited_boost;
@@ -553,15 +597,28 @@ int main(int argc, char** argv) {
             mu_B_gev, mu_Q_gev, mix, step_cfg.seed);
     }
 
+    FreezeoutConfig fo_cfg{};
+    fo_cfg.mode = cluster_mode;
+    fo_cfg.n_fr_fm3 = nfr_fm3;
+    fo_cfg.cells_csv_path = freezeout_cells_csv;
+    if (freezeout_tmin >= 0.0) {
+        fo_cfg.min_time_fm = freezeout_tmin;
+    } else if (mode == "hic") {
+        const double R_ws = 1.12 * std::cbrt(static_cast<double>(A_nuc));
+        const double beta_cm = std::max(0.05, std::tanh(y_cm_beam));
+        fo_cfg.min_time_fm = (R_ws + 2.5) / beta_cm;
+    } else {
+        fo_cfg.min_time_fm = 0.0;
+    }
+
     std::printf("=======================================================================================\n");
-    std::printf(" CUDA Relativistic Nucleon & Cluster Transport (Elastic + Inelastic + Breit-Wigner)\n");
+    std::printf(" CUDA Relativistic Hadron & Cluster Transport (HCGF T^munu + Freeze-Out / Microscopic)\n");
     std::printf("=======================================================================================\n");
     std::printf(" Backend        : %s\n", backend_description().c_str());
-    std::printf(" Scenario       : %s (%s) | EOS: %s | Reactions: %s\n",
+    std::printf(" Scenario       : %s (%s) | EOS: %s | Cluster Mode: %s (n_fr=%.3f fm^-3)\n",
                 mode.c_str(),
                 (gcfg.boundary == BoundaryMode::PeriodicBox) ? "3D Periodic Box" : "Open Expanding",
-                eos_name.c_str(),
-                rxn_cfg.enable_inelastic_2to2 ? "Elastic + Inelastic + BW" : "Elastic Only");
+                eos_name.c_str(), cluster_mode_str.c_str(), fo_cfg.n_fr_fm3);
     std::printf(" Initial N_part : %d test particles (N_test = %d)\n", n_particles, n_test);
     std::printf(" Grid           : %dx%dx%d = %d cells, dV = %.3f fm^3\n",
                 gcfg.nx, gcfg.ny, gcfg.nz, gcfg.num_cells(), gcfg.cell_volume_fm3());
@@ -583,6 +640,7 @@ int main(int argc, char** argv) {
     MeanFieldGrid mean_field(mf_cfg, gcfg);
     mean_field.rebuild_potentials(particles, n_test);
     TransportStepper stepper(step_cfg, xs_cfg, rxn_cfg);
+    FreezeoutCellClusterizer fo_clusterizer(fo_cfg, gcfg);
     ObservableCalculator obs_calc;
 
     const GlobalObservables obs0 = obs_calc.compute(particles);
@@ -600,9 +658,22 @@ int main(int argc, char** argv) {
     const int report_every = (n_steps >= 10) ? (n_steps / 10) : 1;
     int frame_idx = 0;
     int hydro_idx = 0;
+    int tmunu_idx = 0;
     const auto t_wall_start = std::chrono::high_resolution_clock::now();
 
     for (int step = 0; step <= n_steps; ++step) {
+        const double t_now = step * dt_fm;
+        const bool do_tmunu = (!dump_tmunu_dir.empty() && (step % dump_tmunu_every == 0));
+        const bool do_fo_check = (cluster_mode != ClusterMode::Microscopic) &&
+                                 ((step > 0 && step % freezeout_every == 0) || step == n_steps);
+        if (do_fo_check || do_tmunu) {
+            const HcgfGridSnapshot tmunu_snap = fo_clusterizer.process_step(
+                particles, step, t_now, n_test, mf_cfg, step_cfg.seed, /*force_finalize=*/(step == n_steps));
+            if (do_tmunu) {
+                write_hcgf_tmunu_binary(dump_tmunu_dir, tmunu_idx++, step, t_now, gcfg, tmunu_snap);
+            }
+        }
+
         const bool do_frame = (!dump_dir.empty() && (step % dump_every == 0));
         const bool do_hydro = (!dump_hydro_dir.empty() && (step % dump_hydro_every == 0));
         const bool need_obs = (step % report_every == 0) || (step == n_steps) || do_frame || do_hydro;
@@ -610,7 +681,6 @@ int main(int argc, char** argv) {
         if (need_obs) {
             const GlobalObservables obs = obs_calc.compute(particles);
             const StepStats st = stepper.read_stats();
-            const double t_now = step * dt_fm;
 
             const int n_nuc = obs.counts[PROTON] + obs.counts[NEUTRON];
             const int n_d = obs.counts[DEUTERON];
@@ -688,6 +758,12 @@ int main(int argc, char** argv) {
     std::printf(" Max Prob Seen  : %.4f (overflows: %llu) | Active Particles: %d -> %d\n",
                 final_stats.max_prob_seen, final_stats.prob_overflows,
                 obs0.n_active, obs_final.n_active);
+    fo_clusterizer.write_freezeout_cells_csv();
+    if (cluster_mode != ClusterMode::Microscopic) {
+        std::printf(" Freeze-Out Grid: %d cells crossed n_B < %.3f fm^-3 | %lld baryons -> %lld test clusters\n",
+                    fo_clusterizer.total_cells_frozen(), fo_cfg.n_fr_fm3,
+                    fo_clusterizer.total_baryons_converted(), fo_clusterizer.total_clusters_formed());
+    }
     std::printf(" Wall Time      : %.3f s (%.2f ms/step)\n",
                 elapsed_s, 1000.0 * elapsed_s / (n_steps > 0 ? n_steps : 1));
     std::printf("=======================================================================================\n");

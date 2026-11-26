@@ -18,7 +18,8 @@ struct HostParticle {
     double pz = 0.0;
     double mass = 0.0;
     int species = PROTON;
-    int collided = 0;  // 0=none, 1=elastic, 2=inelastic 2->2, 3=formed 2->1, 4=decay 1->2
+    int collided = 0;       // 0=none, 1=elastic, 2=inelastic 2->2, 3=formed 2->1, 4=decay 1->2, 5=freezeout
+    int freezeout_tag = 0;  // 0=dense transport phase, 1=crossed n_B < n_fr freeze-out cell
 };
 
 // Lightweight POD Structure-of-Arrays view passed by value into CUDA __global__ kernels.
@@ -41,6 +42,7 @@ struct ParticleSoAView {
     int* species = nullptr;
     int* cell_id = nullptr;
     int* collided = nullptr;
+    int* freezeout_tag = nullptr;
 };
 
 #if TRANSPORT_HAS_CUDA
@@ -72,6 +74,7 @@ __global__ void compact_particles_kernel(ParticleSoAView src, ParticleSoAView ds
     dst.species[out] = src.species[i];
     dst.cell_id[out] = src.cell_id[i];
     dst.collided[out] = src.collided[i];
+    dst.freezeout_tag[out] = src.freezeout_tag[i];
 }
 }  // namespace detail
 #endif
@@ -121,7 +124,7 @@ public:
 
         if (n == 0) return;
 
-        std::vector<int> hact(n, 1), hsp(n), hcell(n, -1), hcol(n, 0);
+        std::vector<int> hact(n, 1), hsp(n), hcell(n, -1), hcol(n, 0), hfr(n, 0);
         std::vector<Real> ht(n), hx(n), hy(n), hz(n);
         std::vector<Real> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
 
@@ -137,6 +140,7 @@ public:
             hmass[i] = static_cast<Real>(host_p[i].mass);
             hsp[i] = host_p[i].species;
             hcol[i] = host_p[i].collided;
+            hfr[i] = host_p[i].freezeout_tag;
         }
 
         copy_prefix_to_device(active_, hact);
@@ -152,6 +156,7 @@ public:
         copy_prefix_to_device(species_, hsp);
         copy_prefix_to_device(cell_id_, hcell);
         copy_prefix_to_device(collided_, hcol);
+        copy_prefix_to_device(freezeout_tag_, hfr);
     }
 
     // Download ONLY active particles
@@ -161,7 +166,7 @@ public:
         std::vector<HostParticle> out;
         if (n == 0) return out;
 
-        std::vector<int> hact(n), hsp(n), hcol(n);
+        std::vector<int> hact(n), hsp(n), hcol(n), hfr(n);
         std::vector<Real> ht(n), hx(n), hy(n), hz(n);
         std::vector<Real> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
 
@@ -177,6 +182,7 @@ public:
         mass_.copy_to_host(hmass.data(), n);
         species_.copy_to_host(hsp.data(), n);
         collided_.copy_to_host(hcol.data(), n);
+        freezeout_tag_.copy_to_host(hfr.data(), n);
 
         out.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
@@ -193,6 +199,7 @@ public:
             hp.mass = hmass[i];
             hp.species = hsp[i];
             hp.collided = hcol[i];
+            hp.freezeout_tag = hfr[i];
             out.push_back(hp);
         }
         return out;
@@ -235,7 +242,7 @@ public:
             (static_cast<std::size_t>(live) * 2 + 8192 > capacity_)
                 ? (static_cast<std::size_t>(live) * 2 + 8192)
                 : capacity_;
-        DeviceBuffer<int> n_act(new_cap), n_sp(new_cap), n_cid(new_cap), n_col(new_cap);
+        DeviceBuffer<int> n_act(new_cap), n_sp(new_cap), n_cid(new_cap), n_col(new_cap), n_fr(new_cap);
         DeviceBuffer<Real> n_t(new_cap), n_x(new_cap), n_y(new_cap), n_z(new_cap);
         DeviceBuffer<Real> n_E(new_cap), n_px(new_cap), n_py(new_cap), n_pz(new_cap), n_m(new_cap);
 
@@ -246,6 +253,7 @@ public:
         dst.E = n_E.data(); dst.px = n_px.data(); dst.py = n_py.data(); dst.pz = n_pz.data();
         dst.mass = n_m.data(); dst.species = n_sp.data();
         dst.cell_id = n_cid.data(); dst.collided = n_col.data();
+        dst.freezeout_tag = n_fr.data();
 
         d_compact_count_.zero();
         constexpr int TPB = 256;
@@ -262,6 +270,7 @@ public:
         E_ = std::move(n_E); px_ = std::move(n_px); py_ = std::move(n_py); pz_ = std::move(n_pz);
         mass_ = std::move(n_m); species_ = std::move(n_sp);
         cell_id_ = std::move(n_cid); collided_ = std::move(n_col);
+        freezeout_tag_ = std::move(n_fr);
 #else
         if (static_cast<std::size_t>(live) * 2 + 8192 > capacity_) {
             auto host_live = download();
@@ -286,6 +295,7 @@ public:
                 species_.data()[dst] = species_.data()[src];
                 cell_id_.data()[dst] = cell_id_.data()[src];
                 collided_.data()[dst] = collided_.data()[src];
+                freezeout_tag_.data()[dst] = freezeout_tag_.data()[src];
             }
             ++dst;
         }
@@ -313,6 +323,7 @@ public:
         v.species = species_.data();
         v.cell_id = cell_id_.data();
         v.collided = collided_.data();
+        v.freezeout_tag = freezeout_tag_.data();
         return v;
     }
 
@@ -340,6 +351,8 @@ private:
         species_.resize(cap);
         cell_id_.resize(cap);
         collided_.resize(cap);
+        freezeout_tag_.resize(cap);
+        freezeout_tag_.zero();
     }
 
     template <typename T>
@@ -359,7 +372,7 @@ private:
     DeviceBuffer<int> active_;
     DeviceBuffer<Real> t_, x_, y_, z_;
     DeviceBuffer<Real> E_, px_, py_, pz_, mass_;
-    DeviceBuffer<int> species_, cell_id_, collided_;
+    DeviceBuffer<int> species_, cell_id_, collided_, freezeout_tag_;
 };
 
 }  // namespace transport

@@ -114,6 +114,11 @@ HD_INLINE constexpr BinaryInelasticChannel get_inelastic_2to2_channel(int idx) {
     return table[idx];
 }
 
+// True if channel involves any A >= 2 nuclear cluster (false for pure N + Delta + pi channels)
+HD_INLINE constexpr bool channel_involves_nuclear_cluster(int ch_idx) {
+    return (ch_idx <= 45) || (ch_idx >= 52 && ch_idx <= 54);
+}
+
 // Evaluate nonsingular v_moller * sigma_{in -> out}(s) [fm^2] for a given channel & direction.
 // Direction +1: (id1, id2) matches (a, b) -> outgoing (c, d)
 // Direction -1: (id1, id2) matches (c, d) -> outgoing (a, b)
