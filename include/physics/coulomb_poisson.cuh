@@ -247,15 +247,15 @@ public:
             for (int c = 0; c < nc; ++c) coulomb_detail::accum_cell_multipoles(rho_q.data(), c, gcfg_, mp10_.data());
         }
         for (int c = 0; c < nc; ++c) coulomb_detail::build_poisson_rhs_cell(rho_q.data(), buf_a_.data(), c, gcfg_, mp10_.data());
-        for (int c = 0; c < nc; ++c) coulomb_detail::transform_axis_1d_cell(buf_a_.data(), buf_b_.data(), Qx_.data(), c, nx, ny, nz, 0, true);
-        for (int c = 0; c < nc; ++c) coulomb_detail::transform_axis_1d_cell(buf_b_.data(), buf_a_.data(), Qy_.data(), c, nx, ny, nz, 1, true);
-        for (int c = 0; c < nc; ++c) coulomb_detail::transform_axis_1d_cell(buf_a_.data(), buf_b_.data(), Qz_.data(), c, nx, ny, nz, 2, true);
+        host_transform_axis(buf_a_.data(), buf_b_.data(), Qx_.data(), nx, ny, nz, 0, true);
+        host_transform_axis(buf_b_.data(), buf_a_.data(), Qy_.data(), nx, ny, nz, 1, true);
+        host_transform_axis(buf_a_.data(), buf_b_.data(), Qz_.data(), nx, ny, nz, 2, true);
         for (int c = 0; c < nc; ++c) {
             coulomb_detail::spectral_poisson_div_cell(buf_b_.data(), nullptr, c, nx, ny, nz, lx_.data(), ly_.data(), lz_.data(), false);
         }
-        for (int c = 0; c < nc; ++c) coulomb_detail::transform_axis_1d_cell(buf_b_.data(), buf_a_.data(), Qz_.data(), c, nx, ny, nz, 2, false);
-        for (int c = 0; c < nc; ++c) coulomb_detail::transform_axis_1d_cell(buf_a_.data(), buf_b_.data(), Qy_.data(), c, nx, ny, nz, 1, false);
-        for (int c = 0; c < nc; ++c) coulomb_detail::transform_axis_1d_cell(buf_b_.data(), buf_a_.data(), Qx_.data(), c, nx, ny, nz, 0, false);
+        host_transform_axis(buf_b_.data(), buf_a_.data(), Qz_.data(), nx, ny, nz, 2, false);
+        host_transform_axis(buf_a_.data(), buf_b_.data(), Qy_.data(), nx, ny, nz, 1, false);
+        host_transform_axis(buf_b_.data(), buf_a_.data(), Qx_.data(), nx, ny, nz, 0, false);
         for (int c = 0; c < nc; ++c) {
             coulomb_detail::spectral_poisson_div_cell(buf_a_.data(), phi_raw_out.data(), c, nx, ny, nz, nullptr, nullptr, nullptr, true);
         }
@@ -263,6 +263,47 @@ public:
     }
 
 private:
+    static void host_transform_axis(const double* src, double* dst, const double* Q,
+                                    int nx, int ny, int nz, int axis, bool forward) {
+        std::memset(dst, 0, static_cast<std::size_t>(nx * ny * nz) * sizeof(double));
+        if (axis == 0) {
+            for (int yz = 0; yz < ny * nz; ++yz) {
+                const double* s = src + yz * nx;
+                double* d = dst + yz * nx;
+                for (int out_i = 0; out_i < nx; ++out_i) {
+                    double acc = 0.0;
+                    if (forward) {
+                        const double* qrow = Q + out_i * nx;
+                        for (int k = 0; k < nx; ++k) acc += qrow[k] * s[k];
+                    } else {
+                        for (int m = 0; m < nx; ++m) acc += Q[m * nx + out_i] * s[m];
+                    }
+                    d[out_i] = acc;
+                }
+            }
+        } else if (axis == 1) {
+            for (int iz = 0; iz < nz; ++iz) {
+                for (int out_j = 0; out_j < ny; ++out_j) {
+                    double* d = dst + nx * (out_j + ny * iz);
+                    for (int k = 0; k < ny; ++k) {
+                        const double q = forward ? Q[out_j * ny + k] : Q[k * ny + out_j];
+                        const double* s = src + nx * (k + ny * iz);
+                        for (int ix = 0; ix < nx; ++ix) d[ix] += q * s[ix];
+                    }
+                }
+            }
+        } else {
+            const int nxy = nx * ny;
+            for (int out_k = 0; out_k < nz; ++out_k) {
+                double* d = dst + out_k * nxy;
+                for (int k = 0; k < nz; ++k) {
+                    const double q = forward ? Q[out_k * nz + k] : Q[k * nz + out_k];
+                    const double* s = src + k * nxy;
+                    for (int ixy = 0; ixy < nxy; ++ixy) d[ixy] += q * s[ixy];
+                }
+            }
+        }
+    }
     GridConfig gcfg_;
     DeviceBuffer<double> Qx_, Qy_, Qz_, lx_, ly_, lz_, buf_a_, buf_b_, mp10_;
 };

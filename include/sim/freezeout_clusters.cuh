@@ -459,9 +459,20 @@ public:
             cell_baryons[mf_detail::cell_flat(ix, iy, iz, gcfg_)].push_back(i);
         }
 
+        struct ReadyMicroCell {
+            int cell_id = 0, ix = 0, iy = 0, iz = 0, morton_blk = 0;
+            int Np = 0, Nn = 0, Bc = 0;
+            double Ec = 0.0, Ec_t00 = 0.0, Pxc = 0.0, Pyc = 0.0, Pzc = 0.0;
+            double T_gev = 0.0, dnb_dt = 0.0, gnx = 0.0, gny = 0.0, gnz = 0.0;
+            double Pstar[6] = {};
+            double n_expect[NUM_SPECIES] = {};
+            std::size_t rec_idx = 0;
+        };
+        std::vector<ReadyMicroCell> ready_cells;
+
         for (int c = 0; c < nc; ++c) {
             auto& idxs = cell_baryons[c];
-            if (idxs.size() < 2) continue;
+            if (idxs.empty()) continue;
             const double nb_cell = snap.fields[20][c];
             const bool post_sep_expanding = (t_fm >= 1.35 * cfg_.min_time_fm) &&
                                             (nb_cell < cfg_.n_fr_fm3) &&
@@ -507,8 +518,7 @@ public:
                 mutated = true;
             }
 
-            // Compute cell baryon parcel (N_p, N_n, E_c, P_c) and project onto Eckart 4-velocity u^mu:
-            //   E_rest = P_c^mu u_mu = u^0 * E_c - P_c . u
+            // Compute cell baryon parcel (N_p, N_n, E_c, P_c) and project onto Eckart 4-velocity u^mu
             int Np = 0, Nn = 0;
             double Ec = 0.0, Pxc = 0.0, Pyc = 0.0, Pzc = 0.0;
             double jbx_c = 0.0, jby_c = 0.0, jbz_c = 0.0;
@@ -521,7 +531,6 @@ public:
             }
             const int Bc = Np + Nn;
             const double P2 = Pxc * Pxc + Pyc * Pyc + Pzc * Pzc;
-            const double Mc_kin = (Ec * Ec > P2) ? std::sqrt(Ec * Ec - P2) : (Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON);
             const double m_rest_nuc = Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON;
 
             // Exact baryon Eckart collective velocity u^mu = J_B^mu / n_B of cell c's own baryons
@@ -560,12 +569,16 @@ public:
 
             const double E_floor = std::sqrt(P2 + (0.992 * m_rest_nuc) * (0.992 * m_rest_nuc));
             const double Ec_t00 = mf_cfg.enabled ? std::max(E_floor, Ec + e_pot_cell_gev) : Ec;
-            const double E_rest_eckart = u0 * Ec_t00 - (Pxc * ux + Pyc * uy + Pzc * uz);
-            const double e_th_gev = std::clamp((E_rest_eckart - m_rest_nuc) / static_cast<double>(Bc), -0.0065, 0.120);
-            const double Mc = mf_cfg.enabled
-                                  ? std::max(m_rest_nuc - 0.0065 * Bc, std::sqrt(std::max(0.0, Ec_t00 * Ec_t00 - P2)))
-                                  : Mc_kin;
-            const double Yp = static_cast<double>(Np) / static_cast<double>(Bc);
+            double e_th_gev = (u0 * Ec_t00 - (Pxc * ux + Pyc * uy + Pzc * uz) - m_rest_nuc) / static_cast<double>(Bc);
+            // Only for single-particle cells (Bc == 1, zero internal variance), estimate thermal energy from local T^munu
+            if (Bc == 1 && nb_cell > 1.0e-5 && snap.fields[18][c] > 0.0f) {
+                e_th_gev = 0.5 * ((static_cast<double>(snap.fields[18][c]) / nb_cell) - m_rest_nuc);
+            }
+            e_th_gev = std::clamp(e_th_gev, -0.0065, 0.120);
+            const double Yp = (Bc >= 2) ? (static_cast<double>(Np) / static_cast<double>(Bc))
+                                        : std::clamp(static_cast<double>(snap.fields[14][c]) /
+                                                     std::max(static_cast<double>(snap.fields[10][c]), 1.0e-8),
+                                                     0.05, 0.95);
 
             double T_gev = 0.0, muB_gev = 0.0, muQ_gev = 0.0, n_eq[NUM_SPECIES] = {};
             fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
@@ -604,27 +617,102 @@ public:
                 continue;
             }
 
-            // Sample thermally distributed clusters (A = 4 -> A = 3 -> A = 2) from n_eq(T_c, muB_c, muQ_c)
             double nB_hrg = 0.0;
             for (int id = 0; id < NUM_SPECIES; ++id) nB_hrg += get_species_info(id).baryon_num * n_eq[id];
             const double vol_scale = (nB_hrg > 1.0e-12) ? (static_cast<double>(Bc) / nB_hrg) : 0.0;
 
+            ReadyMicroCell mc{};
+            mc.cell_id = c; mc.ix = ix; mc.iy = iy; mc.iz = iz;
+            mc.morton_blk = ((iz / 3) * 1024) + ((iy / 3) * 32) + (ix / 3);
+            mc.Np = Np; mc.Nn = Nn; mc.Bc = Bc;
+            mc.Ec = Ec; mc.Ec_t00 = Ec_t00; mc.Pxc = Pxc; mc.Pyc = Pyc; mc.Pzc = Pzc;
+            mc.T_gev = T_gev; mc.dnb_dt = dnb_dt_vec[c];
+            mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, mc.gnx, mc.gny, mc.gnz);
+            for (int s = 0; s < 6; ++s) mc.Pstar[s] = Pstar_cell[s];
+            for (int id = 0; id < NUM_SPECIES; ++id) mc.n_expect[id] = vol_scale * n_eq[id];
+            mc.rec_idx = records_.size();
+            records_.push_back(rec);
+            ready_cells.push_back(mc);
+        }
+
+        // Sort sparse micro-cells by spatial 3x3x3 neighborhood so grouped parcels are strictly local (~2-3 fm)
+        if (ready_cells.size() > 1) {
+            const bool any_sparse = std::any_of(ready_cells.begin(), ready_cells.end(),
+                                                [](const ReadyMicroCell& m) { return m.Bc < 28; });
+            if (any_sparse) {
+                std::stable_sort(ready_cells.begin(), ready_cells.end(),
+                                 [](const ReadyMicroCell& a, const ReadyMicroCell& b) {
+                                     return a.morton_blk < b.morton_blk;
+                                 });
+            }
+        }
+
+        constexpr int MIN_PARCEL_B = 28;
+        for (std::size_t p0 = 0; p0 < ready_cells.size(); ) {
+            std::size_t p1 = p0 + 1;
+            int Bp = ready_cells[p0].Bc;
+            while (p1 < ready_cells.size() && Bp < MIN_PARCEL_B) {
+                Bp += ready_cells[p1].Bc;
+                ++p1;
+            }
+
+            int Np = 0, Nn = 0;
+            double Ep = 0.0, Ep_t00 = 0.0, Pxp = 0.0, Pyp = 0.0, Pzp = 0.0;
+            double T_w = 0.0, dnb_w = 0.0, gnx_w = 0.0, gny_w = 0.0, gnz_w = 0.0;
+            double Pstar_p[6] = {}, n_exp_p[NUM_SPECIES] = {};
+            std::vector<std::size_t> p_idxs;
+            p_idxs.reserve(static_cast<std::size_t>(Bp));
+
+            for (std::size_t m = p0; m < p1; ++m) {
+                const ReadyMicroCell& mc = ready_cells[m];
+                Np += mc.Np; Nn += mc.Nn;
+                Ep += mc.Ec; Ep_t00 += mc.Ec_t00;
+                Pxp += mc.Pxc; Pyp += mc.Pyc; Pzp += mc.Pzc;
+                T_w += mc.Bc * mc.T_gev;
+                dnb_w += mc.Bc * mc.dnb_dt;
+                gnx_w += mc.Bc * mc.gnx; gny_w += mc.Bc * mc.gny; gnz_w += mc.Bc * mc.gnz;
+                for (int s = 0; s < 6; ++s) Pstar_p[s] += mc.Bc * mc.Pstar[s];
+                for (int id = 0; id < NUM_SPECIES; ++id) n_exp_p[id] += mc.n_expect[id];
+                for (std::size_t idx : cell_baryons[mc.cell_id]) p_idxs.push_back(idx);
+            }
+            if (Bp < 2) {
+                for (std::size_t idx : p_idxs) host_p[idx].freezeout_tag = 1;
+                mutated = true;
+                p0 = p1;
+                continue;
+            }
+            const double inv_Bp = 1.0 / static_cast<double>(Bp);
+            const double T_gev = T_w * inv_Bp;
+            for (int s = 0; s < 6; ++s) Pstar_p[s] *= inv_Bp;
+            double Lambda_p[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, alp_p[3] = {1.0, 1.0, 1.0};
+            if (cfg_.local_anisotropy) hcgf_detail::compute_pratt_torrieri_lambda(Pstar_p, Lambda_p, alp_p);
+
+            const double P2 = Pxp * Pxp + Pyp * Pyp + Pzp * Pzp;
+            const double m_rest_nuc = Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON;
+            const double Mp_kin = (Ep * Ep > P2) ? std::sqrt(Ep * Ep - P2) : m_rest_nuc;
+            const double Mp = mf_cfg.enabled
+                                  ? std::max(m_rest_nuc - 0.0065 * Bp, std::sqrt(std::max(0.0, Ep_t00 * Ep_t00 - P2)))
+                                  : Mp_kin;
+
+            PhiloxRng rng(seed ^ 0xC1057E2ULL, static_cast<std::uint64_t>(step),
+                          static_cast<std::uint64_t>(ready_cells[p0].cell_id) + 0x55AAULL);
+
             std::vector<int> out_species;
             int rem_p = Np, rem_n = Nn, n_cl_formed = 0;
             double m_out_pole = 0.0;
-            // Sample heaviest clusters first (A = max_cluster_A .. 2) so rare A=5,6,4 isotopes aren't starved
             for (int target_A = cfg_.max_cluster_A; target_A >= 2; --target_A) {
                 for (int id = 0; id < NUM_SPECIES; ++id) {
                     const SpeciesInfo sp = get_species_info(id);
-                    if (sp.baryon_num != target_A || n_eq[id] <= 0.0) continue;
+                    if (sp.baryon_num != target_A || n_exp_p[id] <= 0.0) continue;
                     const int Z = sp.charge, N = sp.baryon_num - sp.charge;
                     if (Z < 0 || N < 0) continue;
-                    const int n_draw = fo_detail::sample_poisson(vol_scale * n_eq[id], rng);
+                    const int n_draw = fo_detail::sample_poisson(n_exp_p[id], rng);
                     for (int d = 0; d < n_draw; ++d) {
                         const int after_rem = (rem_p - Z) + (rem_n - N) + static_cast<int>(out_species.size()) + 1;
                         const double m_cand = m_out_pole + sp.pole_mass_gev +
                                               (rem_p - Z) * phys::MASS_PROTON + (rem_n - N) * phys::MASS_NEUTRON;
-                        if (rem_p >= Z && rem_n >= N && after_rem >= 2 && m_cand < Mc - 1.0e-3) {
+                        const bool mass_ok = mf_cfg.enabled || (m_cand < Mp_kin - 1.0e-3);
+                        if (rem_p >= Z && rem_n >= N && after_rem >= 2 && mass_ok) {
                             out_species.push_back(id);
                             m_out_pole += sp.pole_mass_gev;
                             rem_p -= Z; rem_n -= N;
@@ -633,14 +721,15 @@ public:
                     }
                 }
             }
-            rec.clusters_formed = n_cl_formed;
-            total_baryons_converted_ += Bc;
+
+            records_[ready_cells[p0].rec_idx].clusters_formed = n_cl_formed;
+            total_baryons_converted_ += Bp;
             total_clusters_formed_ += n_cl_formed;
 
             if (n_cl_formed == 0) {
-                for (std::size_t idx : idxs) host_p[idx].freezeout_tag = 1;
-                records_.push_back(rec);
+                for (std::size_t idx : p_idxs) host_p[idx].freezeout_tag = 1;
                 mutated = true;
+                p0 = p1;
                 continue;
             }
             for (int k = 0; k < rem_p; ++k) out_species.push_back(PROTON);
@@ -654,7 +743,7 @@ public:
                 mk[k] = sp.is_excited ? sample_thermal_breit_wigner_mass(out_species[k], T_gev, rng) : sp.pole_mass_gev;
                 m_sum += mk[k];
             }
-            if (m_sum >= Mc - 1.0e-5) {
+            if (!mf_cfg.enabled && m_sum >= Mp - 1.0e-5) {
                 m_sum = 0.0;
                 for (int k = 0; k < K; ++k) {
                     mk[k] = get_species_info(out_species[k]).pole_mass_gev;
@@ -662,28 +751,25 @@ public:
                 }
             }
 
-            // Spatial gradient grad(n_B) for Cooper-Frye back-emission tracking / outward filtering
-            double gnx = 0.0, gny = 0.0, gnz = 0.0;
-            mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, gnx, gny, gnz);
             const bool outward_cut = (!force_finalize && cfg_.backflow == BackflowMode::OutwardOnly);
-
-            const double Mc_use = mf_cfg.enabled ? std::max(Mc, m_sum + 0.0012 * K) : Mc;
-            const double Ec_use = mf_cfg.enabled ? std::sqrt(Mc_use * Mc_use + P2) : Ec;
+            const double Mp_use = mf_cfg.enabled ? std::max(Mp, m_sum + 0.0012 * K) : Mp;
+            const double Ep_use = mf_cfg.enabled ? std::sqrt(Mp_use * Mp_use + P2) : Ep;
+            // Ensure sampling temperature matches available parcel Q-value so k-body Newton solver never rejects cold parcels
+            const double T_kin_sample = std::max(0.0015, std::min(T_gev, 0.67 * (Mp_use - m_sum) / std::max(1, K - 1)));
             std::vector<FourVector> p_out;
             int inward_cnt = 0;
             if (!fo_detail::sample_conservative_kbody(
-                    out_species, mk, T_gev, Ec_use, Pxc, Pyc, Pzc,
-                    outward_cut, dnb_dt_vec[c], gnx, gny, gnz, rng, p_out, inward_cnt,
-                    cfg_.local_anisotropy ? Lambda_cell : nullptr)) {
-                records_.push_back(rec);
+                    out_species, mk, T_kin_sample, Ep_use, Pxp, Pyp, Pzp,
+                    outward_cut, dnb_w * inv_Bp, gnx_w * inv_Bp, gny_w * inv_Bp, gnz_w * inv_Bp,
+                    rng, p_out, inward_cnt, cfg_.local_anisotropy ? Lambda_p : nullptr)) {
+                p0 = p1;
                 continue;
             }
-            rec.back_emitted = inward_cnt;
+            records_[ready_cells[p0].rec_idx].back_emitted = inward_cnt;
             back_emitted_total_ += inward_cnt;
-            records_.push_back(rec);
 
             for (int k = 0; k < K; ++k) {
-                HostParticle hp = host_p[idxs[k % idxs.size()]];
+                HostParticle hp = host_p[p_idxs[k % p_idxs.size()]];
                 hp.species = out_species[k];
                 hp.mass = mk[k];
                 hp.E = p_out[k].t; hp.px = p_out[k].x; hp.py = p_out[k].y; hp.pz = p_out[k].z;
@@ -691,8 +777,9 @@ public:
                 hp.freezeout_tag = 1;
                 spawned.push_back(hp);
             }
-            for (std::size_t idx : idxs) remove_mask[idx] = 1;
+            for (std::size_t idx : p_idxs) remove_mask[idx] = 1;
             mutated = true;
+            p0 = p1;
         }
 
         if (mutated) {
