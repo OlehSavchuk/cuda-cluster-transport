@@ -354,7 +354,8 @@ int main(int argc, char** argv) {
     std::string cluster_mode_str = "freezeout";
     std::string backflow_str = "remelt";
     bool local_anisotropy = true;
-    int pauli_override = -1;  // -1: auto (ON in hic mode, OFF in classical box modes); 0: OFF; 1: ON
+    int pauli_override = -1;    // -1: auto (ON in hic mode, OFF in classical box modes); 0: OFF; 1: ON
+    int coulomb_override = -1;  // -1: auto (ON in hic mode, OFF in box modes); 0: OFF; 1: ON
     int max_cluster_A = 6;
     double nfr_fm3 = 0.040;
     int freezeout_every = 2;
@@ -411,6 +412,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--pauli" || arg == "--pauli-blocking") {
             const std::string v = next_str();
             pauli_override = (v == "on" || v == "1" || v == "true") ? 1 : 0;
+        } else if (arg == "--coulomb") {
+            const std::string v = next_str();
+            coulomb_override = (v == "on" || v == "1" || v == "true") ? 1 : 0;
         } else if (arg == "--max-cluster-A") {
             max_cluster_A = std::stoi(next_str());
         } else if (arg == "--nfr") {
@@ -516,7 +520,8 @@ int main(int argc, char** argv) {
     if (eos_name == "skyrme-soft") eos_preset = EOSPreset::SkyrmeSoft;
     else if (eos_name == "md-soft") eos_preset = EOSPreset::MDSoft;
     else if (eos_name == "md-stiff") eos_preset = EOSPreset::MDStiff;
-    const MeanFieldConfig mf_cfg = make_mean_field_config(eos_preset);
+    MeanFieldConfig mf_cfg = make_mean_field_config(eos_preset);
+    mf_cfg.coulomb_enabled = (coulomb_override >= 0) ? (coulomb_override == 1) : (mode == "hic");
 
     step_cfg.dt_fm = dt_fm;
     step_cfg.n_test = n_test;
@@ -641,10 +646,11 @@ int main(int argc, char** argv) {
     std::printf(" CUDA Relativistic Hadron & Cluster Transport (HCGF T^munu + Freeze-Out / Microscopic)\n");
     std::printf("=======================================================================================\n");
     std::printf(" Backend        : %s\n", backend_description().c_str());
-    std::printf(" Scenario       : %s (%s) | EOS: %s | Cluster Mode: %s (n_fr=%.3f fm^-3)\n",
+    std::printf(" Scenario       : %s (%s) | EOS: %s | Coulomb: %s | Cluster Mode: %s (n_fr=%.3f fm^-3)\n",
                 mode.c_str(),
                 (gcfg.boundary == BoundaryMode::PeriodicBox) ? "3D Periodic Box" : "Open Expanding",
-                eos_name.c_str(), cluster_mode_str.c_str(), fo_cfg.n_fr_fm3);
+                eos_name.c_str(), mf_cfg.coulomb_enabled ? "ON" : "OFF",
+                cluster_mode_str.c_str(), fo_cfg.n_fr_fm3);
     std::printf(" Initial N_part : %d test particles (N_test = %d)\n", n_particles, n_test);
     std::printf(" Grid           : %dx%dx%d = %d cells, dV = %.3f fm^3\n",
                 gcfg.nx, gcfg.ny, gcfg.nz, gcfg.num_cells(), gcfg.cell_volume_fm3());

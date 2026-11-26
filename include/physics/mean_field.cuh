@@ -4,6 +4,7 @@
 #include <cstdint>
 #include "backend/cuda_compat.cuh"
 #include "physics/constants.cuh"
+#include "physics/coulomb_poisson.cuh"
 #include "physics/species.cuh"
 #include "sim/grid.cuh"
 #include "sim/particles.cuh"
@@ -17,14 +18,16 @@ enum class EOSPreset : int {
     MDStiff = 3        // GBD / Danielewicz MD-Skyrme Stiff: K_0 = 380 MeV, m*(p_F)/m = 0.70
 };
 
-// Parameters of the Skyrme + Symmetry + Surface + Lorentzian Momentum-Dependent EDF:
+// Parameters of the Skyrme + Symmetry + Surface + Lorentzian Momentum-Dependent + Coulomb EDF:
 //   U_tau(r, p_N) = A_sk * u + B_sk * u^sigma + 2 * S_pot * u^gamma * delta * tau_z
-//                   + D_surf * laplacian(rho_B) / rho_0
 //                   + 0.5 * C_md * [ Psi_md(r) + u / (1 + |p_N - p_f(r)|^2 / Lambda_md^2) ]
+//                   + Q_i * Phi_Coul(r),   where -laplacian(Phi_Coul) = 4 pi e^2 rho_Q(r)
 // All energy couplings stored in GeV so single-particle energies & forces match (E, p) in GeV!
 struct MeanFieldConfig {
     bool enabled = false;
+    bool coulomb_enabled = false;  // 3D Poisson electrostatic potential & Vlasov Lorentz/Coulomb force
     EOSPreset preset = EOSPreset::None;
+    HD_INLINE bool is_active() const { return enabled || coulomb_enabled; }
     double rho0_fm3 = 0.16;        // Nuclear saturation density [fm^-3]
     double A_sk_gev = -0.2096;     // Attractive two-body Skyrme coefficient [GeV]
     double B_sk_gev = 0.1564;      // Repulsive density-dependent Skyrme coefficient [GeV]
@@ -146,6 +149,8 @@ struct MeanFieldView {
     Real* u_loc_p = nullptr;
     Real* u_loc_n = nullptr;
     Real* u_md_dual = nullptr;
+    Real* rho_q = nullptr;
+    Real* phi_coul = nullptr;
     Real* tmp_buf = nullptr;
 };
 
@@ -275,20 +280,27 @@ HD_INLINE void sample_cic_grad(const Real* field, double x, double y, double z,
 
 HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
                                            double norm_inv_n_dV, MeanFieldView& mf) {
-    if (!p.active[i] || p.freezeout_tag[i] != 0) return;
+    if (!p.active[i]) return;
+    const SpeciesInfo sp = get_species_info(p.species[i]);
+    const bool do_nuc = mf.cfg.enabled && (p.freezeout_tag[i] == 0) && (sp.baryon_num > 0);
+    const bool do_coul = mf.cfg.coulomb_enabled && (sp.charge != 0);
+    if (!do_nuc && !do_coul) return;
+
     int i0, j0, k0;
     double fx, fy, fz;
     if (!cic_weights(p.x[i], p.y[i], p.z[i], mf.gcfg, i0, j0, k0, fx, fy, fz)) return;
 
-    const SpeciesInfo sp = get_species_info(p.species[i]);
-    if (sp.baryon_num == 0) return;
-    double wp = 0.0, wn = 0.0;
-    get_effective_pn_weights(p.species[i], wp, wn);
-    const double zp = wp * norm_inv_n_dV;
-    const double zn = wn * norm_inv_n_dV;
-    const double pxw = p.px[i] * norm_inv_n_dV;
-    const double pyw = p.py[i] * norm_inv_n_dV;
-    const double pzw = p.pz[i] * norm_inv_n_dV;
+    double zp = 0.0, zn = 0.0, pxw = 0.0, pyw = 0.0, pzw = 0.0;
+    if (do_nuc) {
+        double wp = 0.0, wn = 0.0;
+        get_effective_pn_weights(p.species[i], wp, wn);
+        zp = wp * norm_inv_n_dV;
+        zn = wn * norm_inv_n_dV;
+        pxw = p.px[i] * norm_inv_n_dV;
+        pyw = p.py[i] * norm_inv_n_dV;
+        pzw = p.pz[i] * norm_inv_n_dV;
+    }
+    const double zq = do_coul ? (static_cast<double>(sp.charge) * norm_inv_n_dV) : 0.0;
 
     for (int dz = 0; dz <= 1; ++dz) {
         const int iz = wrap_or_clamp_idx(k0 + dz, mf.gcfg.nz, mf.gcfg.boundary);
@@ -300,11 +312,16 @@ HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
                 const int ix = wrap_or_clamp_idx(i0 + dx, mf.gcfg.nx, mf.gcfg.boundary);
                 const double w = ((dx == 0) ? (1.0 - fx) : fx) * wy * wz;
                 const int c = cell_flat(ix, iy, iz, mf.gcfg);
-                if (zp > 0.0) portable_atomic_add_real(&mf.rho_p[c], static_cast<Real>(w * zp));
-                if (zn > 0.0) portable_atomic_add_real(&mf.rho_n[c], static_cast<Real>(zn * w));
-                portable_atomic_add_real(&mf.px_sum[c], static_cast<Real>(w * pxw));
-                portable_atomic_add_real(&mf.py_sum[c], static_cast<Real>(w * pyw));
-                portable_atomic_add_real(&mf.pz_sum[c], static_cast<Real>(w * pzw));
+                if (do_nuc) {
+                    if (zp > 0.0) portable_atomic_add_real(&mf.rho_p[c], static_cast<Real>(w * zp));
+                    if (zn > 0.0) portable_atomic_add_real(&mf.rho_n[c], static_cast<Real>(zn * w));
+                    portable_atomic_add_real(&mf.px_sum[c], static_cast<Real>(w * pxw));
+                    portable_atomic_add_real(&mf.py_sum[c], static_cast<Real>(w * pyw));
+                    portable_atomic_add_real(&mf.pz_sum[c], static_cast<Real>(w * pzw));
+                }
+                if (do_coul) {
+                    portable_atomic_add_real(&mf.rho_q[c], static_cast<Real>(w * zq));
+                }
             }
         }
     }
@@ -429,89 +446,108 @@ HD_INLINE void eval_node_potentials(MeanFieldView& mf, int c) {
     mf.u_md_dual[c] = static_cast<Real>(0.5 * mf.cfg.C_md_gev * u);
 }
 
-// Symplectic momentum kick dp/dt = -grad_r U_cluster(A, Z, r, p) over interval dt
+// Symplectic momentum kick dp/dt = -grad_r U_cluster(A, Z, r, p) - Q * grad_r Phi_Coul(r) over dt
 HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
                                     const MeanFieldView& mf, double* cm_accum) {
-    if (!p.active[i] || p.freezeout_tag[i] != 0) return;
-    const double x = p.x[i], y = p.y[i], z = p.z[i];
+    if (!p.active[i]) return;
     const SpeciesInfo sp = get_species_info(p.species[i]);
-    if (sp.baryon_num == 0) return;
-    double Z = 0.0, N = 0.0;
-    get_effective_pn_weights(p.species[i], Z, N);
-    const double A = static_cast<double>(sp.baryon_num);
+    const bool do_nuc = mf.cfg.enabled && (p.freezeout_tag[i] == 0) && (sp.baryon_num > 0);
+    const bool do_coul = mf.cfg.coulomb_enabled && (sp.charge != 0);
+    if (!do_nuc && !do_coul) return;
 
-    double gpx = 0.0, gpy = 0.0, gpz = 0.0;
-    double gnx = 0.0, gny = 0.0, gnz = 0.0;
-    sample_cic_grad(mf.u_loc_p, x, y, z, mf.gcfg, gpx, gpy, gpz);
-    sample_cic_grad(mf.u_loc_n, x, y, z, mf.gcfg, gnx, gny, gnz);
+    const double x = p.x[i], y = p.y[i], z = p.z[i];
+    double fx = 0.0, fy = 0.0, fz = 0.0;
 
-    double fx = -Z * gpx - N * gnx;
-    double fy = -Z * gpy - N * gny;
-    double fz = -Z * gpz - N * gnz;
+    if (do_coul) {
+        double gcx = 0.0, gcy = 0.0, gcz = 0.0;
+        sample_cic_grad(mf.phi_coul, x, y, z, mf.gcfg, gcx, gcy, gcz);
+        const double Q = static_cast<double>(sp.charge);
+        fx -= Q * gcx;
+        fy -= Q * gcy;
+        fz -= Q * gcz;
+    }
 
-    if (::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
-        double u_loc, pfx, pfy, pfz;
-        sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
-        double gmdx, gmdy, gmdz;
-        sample_cic_grad(mf.u_md_dual, x, y, z, mf.gcfg, gmdx, gmdy, gmdz);
+    if (do_nuc) {
+        double Z = 0.0, N = 0.0;
+        get_effective_pn_weights(p.species[i], Z, N);
+        const double A = static_cast<double>(sp.baryon_num);
 
-        const double qx = p.px[i] / A - pfx;
-        const double qy = p.py[i] / A - pfy;
-        const double qz = p.pz[i] / A - pfz;
-        const double inv_lam2 = 1.0 / (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
-        const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2;
-        const double md_coef = -A / denom;
-        fx += md_coef * gmdx;
-        fy += md_coef * gmdy;
-        fz += md_coef * gmdz;
+        double gpx = 0.0, gpy = 0.0, gpz = 0.0;
+        double gnx = 0.0, gny = 0.0, gnz = 0.0;
+        sample_cic_grad(mf.u_loc_p, x, y, z, mf.gcfg, gpx, gpy, gpz);
+        sample_cic_grad(mf.u_loc_n, x, y, z, mf.gcfg, gnx, gny, gnz);
 
-        // Product-rule force from spatial variation of local collective frame p_f(r) = Pi(r)/rho_B(r)
-        const double rho_loc = u_loc * mf.cfg.rho0_fm3;
-        if (rho_loc > 1.0e-4) {
-            const double u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
-            double grpx, grpy, grpz, grnx, grny, grnz;
-            sample_cic_grad(mf.rho_p, x, y, z, mf.gcfg, grpx, grpy, grpz);
-            sample_cic_grad(mf.rho_n, x, y, z, mf.gcfg, grnx, grny, grnz);
-            const double grx = grpx + grnx, gry = grpy + grny, grz = grpz + grnz;
+        fx += -Z * gpx - N * gnx;
+        fy += -Z * gpy - N * gny;
+        fz += -Z * gpz - N * gnz;
 
-            double gpix_x, gpix_y, gpix_z, gpiy_x, gpiy_y, gpiy_z, gpiz_x, gpiz_y, gpiz_z;
-            sample_cic_grad(mf.px_sum, x, y, z, mf.gcfg, gpix_x, gpix_y, gpix_z);
-            sample_cic_grad(mf.py_sum, x, y, z, mf.gcfg, gpiy_x, gpiy_y, gpiy_z);
-            sample_cic_grad(mf.pz_sum, x, y, z, mf.gcfg, gpiz_x, gpiz_y, gpiz_z);
+        if (::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
+            double u_loc, pfx, pfy, pfz;
+            sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
+            double gmdx, gmdy, gmdz;
+            sample_cic_grad(mf.u_md_dual, x, y, z, mf.gcfg, gmdx, gmdy, gmdz);
 
-            const double inv_rho = 1.0 / rho_loc;
-            const double q_dpf_dx = (qx * (gpix_x - pfx * grx) + qy * (gpiy_x - pfy * grx) + qz * (gpiz_x - pfz * grx)) * inv_rho;
-            const double q_dpf_dy = (qx * (gpix_y - pfx * gry) + qy * (gpiy_y - pfy * gry) + qz * (gpiz_y - pfz * gry)) * inv_rho;
-            const double q_dpf_dz = (qx * (gpix_z - pfx * grz) + qy * (gpiy_z - pfy * grz) + qz * (gpiz_z - pfz * grz)) * inv_rho;
-            const double pf_coef = -(2.0 * A * u_dual * inv_lam2) / (denom * denom);
-            fx += pf_coef * q_dpf_dx;
-            fy += pf_coef * q_dpf_dy;
-            fz += pf_coef * q_dpf_dz;
+            const double qx = p.px[i] / A - pfx;
+            const double qy = p.py[i] / A - pfy;
+            const double qz = p.pz[i] / A - pfz;
+            const double inv_lam2 = 1.0 / (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
+            const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2;
+            const double md_coef = -A / denom;
+            fx += md_coef * gmdx;
+            fy += md_coef * gmdy;
+            fz += md_coef * gmdz;
+
+            // Product-rule force from spatial variation of local collective frame p_f(r) = Pi(r)/rho_B(r)
+            const double rho_loc = u_loc * mf.cfg.rho0_fm3;
+            if (rho_loc > 1.0e-4) {
+                const double u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
+                double grpx, grpy, grpz, grnx, grny, grnz;
+                sample_cic_grad(mf.rho_p, x, y, z, mf.gcfg, grpx, grpy, grpz);
+                sample_cic_grad(mf.rho_n, x, y, z, mf.gcfg, grnx, grny, grnz);
+                const double grx = grpx + grnx, gry = grpy + grny, grz = grpz + grnz;
+
+                double gpix_x, gpix_y, gpix_z, gpiy_x, gpiy_y, gpiy_z, gpiz_x, gpiz_y, gpiz_z;
+                sample_cic_grad(mf.px_sum, x, y, z, mf.gcfg, gpix_x, gpix_y, gpix_z);
+                sample_cic_grad(mf.py_sum, x, y, z, mf.gcfg, gpiy_x, gpiy_y, gpiy_z);
+                sample_cic_grad(mf.pz_sum, x, y, z, mf.gcfg, gpiz_x, gpiz_y, gpiz_z);
+
+                const double inv_rho = 1.0 / rho_loc;
+                const double q_dpf_dx = (qx * (gpix_x - pfx * grx) + qy * (gpiy_x - pfy * grx) + qz * (gpiz_x - pfz * grx)) * inv_rho;
+                const double q_dpf_dy = (qx * (gpix_y - pfx * gry) + qy * (gpiy_y - pfy * gry) + qz * (gpiz_y - pfz * gry)) * inv_rho;
+                const double q_dpf_dz = (qx * (gpix_z - pfx * grz) + qy * (gpiy_z - pfy * grz) + qz * (gpiz_z - pfz * grz)) * inv_rho;
+                const double pf_coef = -(2.0 * A * u_dual * inv_lam2) / (denom * denom);
+                fx += pf_coef * q_dpf_dx;
+                fy += pf_coef * q_dpf_dy;
+                fz += pf_coef * q_dpf_dz;
+            }
         }
     }
 
     const double dpx = fx * dt;
     const double dpy = fy * dt;
     const double dpz = fz * dt;
+    const double w_cm = static_cast<double>(p.mass[i]);
     p.px[i] += dpx;
     p.py[i] += dpy;
     p.pz[i] += dpz;
     portable_atomic_add_double(&cm_accum[0], dpx);
     portable_atomic_add_double(&cm_accum[1], dpy);
     portable_atomic_add_double(&cm_accum[2], dpz);
-    portable_atomic_add_double(&cm_accum[3], A);
+    portable_atomic_add_double(&cm_accum[3], w_cm);
 }
 
-// Subtract spurious discrete-lattice net impulse per baryon so total 3-momentum is exact to ~1e-14
-HD_INLINE void remove_lattice_cm_impulse(ParticleSoAView& p, int i,
+// Subtract spurious discrete-lattice net impulse proportional to mass so total 3-momentum is exact to ~1e-14
+HD_INLINE void remove_lattice_cm_impulse(ParticleSoAView& p, int i, const MeanFieldConfig& cfg,
                                          double corr_x, double corr_y, double corr_z) {
-    if (!p.active[i] || p.freezeout_tag[i] != 0) return;
-    const int bnum = get_species_info(p.species[i]).baryon_num;
-    if (bnum == 0) return;
-    const double A = static_cast<double>(bnum);
-    p.px[i] -= A * corr_x;
-    p.py[i] -= A * corr_y;
-    p.pz[i] -= A * corr_z;
+    if (!p.active[i]) return;
+    const SpeciesInfo sp = get_species_info(p.species[i]);
+    const bool do_nuc = cfg.enabled && (p.freezeout_tag[i] == 0) && (sp.baryon_num > 0);
+    const bool do_coul = cfg.coulomb_enabled && (sp.charge != 0);
+    if (!do_nuc && !do_coul) return;
+    const double w_cm = static_cast<double>(p.mass[i]);
+    p.px[i] -= w_cm * corr_x;
+    p.py[i] -= w_cm * corr_y;
+    p.pz[i] -= w_cm * corr_z;
     const double m = p.mass[i];
     p.E[i] = ::sqrt(m * m + p.px[i] * p.px[i] + p.py[i] * p.py[i] + p.pz[i] * p.pz[i]);
 }
@@ -567,15 +603,18 @@ HD_INLINE double eval_particle_potential_gev(const MeanFieldView& mf,
                                              int species_id,
                                              double x, double y, double z,
                                              double px, double py, double pz) {
-    if (!mf.cfg.enabled) return 0.0;
     const SpeciesInfo sp = get_species_info(species_id);
-    if (sp.baryon_num == 0) return 0.0;
+    double u_tot = 0.0;
+    if (mf.cfg.coulomb_enabled && sp.charge != 0 && mf.phi_coul != nullptr) {
+        u_tot += static_cast<double>(sp.charge) * sample_cic_scalar(mf.phi_coul, x, y, z, mf.gcfg);
+    }
+    if (!mf.cfg.enabled || sp.baryon_num == 0) return u_tot;
     double Z = 0.0, N = 0.0;
     get_effective_pn_weights(species_id, Z, N);
     const double A = static_cast<double>(sp.baryon_num);
 
-    double u_tot = Z * sample_cic_scalar(mf.u_loc_p, x, y, z, mf.gcfg) +
-                   N * sample_cic_scalar(mf.u_loc_n, x, y, z, mf.gcfg);
+    u_tot += Z * sample_cic_scalar(mf.u_loc_p, x, y, z, mf.gcfg) +
+             N * sample_cic_scalar(mf.u_loc_n, x, y, z, mf.gcfg);
     if (::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
         double u_loc, pfx, pfy, pfz;
         sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
@@ -702,9 +741,9 @@ __global__ void kick_vlasov_kernel(ParticleSoAView p, double dt, MeanFieldView m
     if (i < p.n) kick_particle_vlasov(p, i, dt, mf, cm_accum);
 }
 
-__global__ void remove_cm_impulse_kernel(ParticleSoAView p, double cx, double cy, double cz) {
+__global__ void remove_cm_impulse_kernel(ParticleSoAView p, MeanFieldConfig cfg, double cx, double cy, double cz) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < p.n) remove_lattice_cm_impulse(p, i, cx, cy, cz);
+    if (i < p.n) remove_lattice_cm_impulse(p, i, cfg, cx, cy, cz);
 }
 
 __global__ void drift_vlasov_kernel(ParticleSoAView p, double dt, MeanFieldView mf) {
@@ -748,22 +787,34 @@ public:
         u_loc_p_.resize(nc); u_loc_p_.zero();
         u_loc_n_.resize(nc); u_loc_n_.zero();
         u_md_dual_.resize(nc); u_md_dual_.zero();
+        rho_q_.resize(nc); rho_q_.zero();
+        phi_coul_raw_.resize(nc); phi_coul_raw_.zero();
+        phi_coul_.resize(nc); phi_coul_.zero();
         tmp_buf_.resize(nc); tmp_buf_.zero();
         cm_accum_.resize(6); cm_accum_.zero();
+        if (cfg_.coulomb_enabled && nc > 0) {
+            poisson_solver_.configure(gcfg_);
+        }
     }
 
     void rebuild_potentials(ParticleSystem& particles, int n_test) {
-        if (!cfg_.enabled) return;
+        if (!cfg_.is_active()) return;
         const int np = particles.slot_size();
         const int nc = gcfg_.num_cells();
         if (nc == 0) return;
 
-        rho_p_.zero(); rho_n_.zero();
-        px_sum_.zero(); py_sum_.zero(); pz_sum_.zero();
-        psi_md_.zero();
+        if (cfg_.enabled) {
+            rho_p_.zero(); rho_n_.zero();
+            px_sum_.zero(); py_sum_.zero(); pz_sum_.zero();
+            psi_md_.zero();
+        }
+        if (cfg_.coulomb_enabled) {
+            rho_q_.zero();
+        }
 
         if (np == 0) {
             u_loc_p_.zero(); u_loc_n_.zero(); u_md_dual_.zero();
+            phi_coul_raw_.zero(); phi_coul_.zero();
             return;
         }
 
@@ -781,45 +832,60 @@ public:
         for (int i = 0; i < np; ++i) mf_detail::deposit_particle_baryon_cic(pv, i, inv_n_dV, mfv);
 #endif
 
-        for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
-            smooth_field_3d(rho_p_);
-            smooth_field_3d(rho_n_);
-            smooth_field_3d(px_sum_);
-            smooth_field_3d(py_sum_);
-            smooth_field_3d(pz_sum_);
-        }
+        if (cfg_.enabled) {
+            for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
+                smooth_field_3d(rho_p_);
+                smooth_field_3d(rho_n_);
+                smooth_field_3d(px_sum_);
+                smooth_field_3d(py_sum_);
+                smooth_field_3d(pz_sum_);
+            }
 
-        if (std::fabs(cfg_.C_md_gev) > 1.0e-12) {
-            const double inv_md = inv_n_dV / cfg_.rho0_fm3;
+            if (std::fabs(cfg_.C_md_gev) > 1.0e-12) {
+                const double inv_md = inv_n_dV / cfg_.rho0_fm3;
 #if TRANSPORT_HAS_CUDA
-            constexpr int TPB = 256;
-            const int p_blocks = (np + TPB - 1) / TPB;
-            mf_detail::deposit_md_psi_cic_kernel<<<p_blocks, TPB>>>(pv, inv_md, mfv);
+                mf_detail::deposit_md_psi_cic_kernel<<<p_blocks, TPB>>>(pv, inv_md, mfv);
+                CUDA_CHECK(cudaGetLastError());
+#else
+                for (int i = 0; i < np; ++i) mf_detail::deposit_particle_md_psi_cic(pv, i, inv_md, mfv);
+#endif
+                for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
+                    smooth_field_3d(psi_md_);
+                }
+            }
+
+#if TRANSPORT_HAS_CUDA
+            mf_detail::eval_potentials_kernel<<<c_blocks, TPB>>>(mfv, nc);
             CUDA_CHECK(cudaGetLastError());
 #else
-            for (int i = 0; i < np; ++i) mf_detail::deposit_particle_md_psi_cic(pv, i, inv_md, mfv);
+            for (int c = 0; c < nc; ++c) mf_detail::eval_node_potentials(mfv, c);
 #endif
+            // Apply self-adjoint Gaussian filter G^T = G to node potentials for exact variational forces!
             for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
-                smooth_field_3d(psi_md_);
+                smooth_field_3d(u_loc_p_);
+                smooth_field_3d(u_loc_n_);
+                if (std::fabs(cfg_.C_md_gev) > 1.0e-12) smooth_field_3d(u_md_dual_);
             }
         }
 
+        if (cfg_.coulomb_enabled) {
+            for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
+                smooth_field_3d(rho_q_);
+            }
+            poisson_solver_.solve(rho_q_, phi_coul_raw_);
 #if TRANSPORT_HAS_CUDA
-        mf_detail::eval_potentials_kernel<<<c_blocks, TPB>>>(mfv, nc);
-        CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaMemcpy(phi_coul_.data(), phi_coul_raw_.data(), nc * sizeof(Real), cudaMemcpyDeviceToDevice));
 #else
-        for (int c = 0; c < nc; ++c) mf_detail::eval_node_potentials(mfv, c);
+            std::memcpy(phi_coul_.data(), phi_coul_raw_.data(), nc * sizeof(Real));
 #endif
-        // Apply self-adjoint Gaussian filter G^T = G to node potentials for exact variational forces!
-        for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
-            smooth_field_3d(u_loc_p_);
-            smooth_field_3d(u_loc_n_);
-            if (std::fabs(cfg_.C_md_gev) > 1.0e-12) smooth_field_3d(u_md_dual_);
+            for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
+                smooth_field_3d(phi_coul_);
+            }
         }
     }
 
     void kick(ParticleSystem& particles, double dt) {
-        if (!cfg_.enabled) return;
+        if (!cfg_.is_active()) return;
         const int np = particles.slot_size();
         if (np == 0) return;
         ParticleSoAView pv = particles.view();
@@ -832,16 +898,16 @@ public:
         CUDA_CHECK(cudaGetLastError());
         double h_cm[4] = {};
         cm_accum_.copy_to_host(h_cm, 4);
-        const double inv_B = (h_cm[3] > 0.0) ? (1.0 / h_cm[3]) : 0.0;
+        const double inv_W = (h_cm[3] > 0.0) ? (1.0 / h_cm[3]) : 0.0;
         mf_detail::remove_cm_impulse_kernel<<<p_blocks, TPB>>>(
-            pv, h_cm[0] * inv_B, h_cm[1] * inv_B, h_cm[2] * inv_B);
+            pv, cfg_, h_cm[0] * inv_W, h_cm[1] * inv_W, h_cm[2] * inv_W);
         CUDA_CHECK(cudaGetLastError());
 #else
         double* cm = cm_accum_.data();
         for (int i = 0; i < np; ++i) mf_detail::kick_particle_vlasov(pv, i, dt, mfv, cm);
-        const double inv_B = (cm[3] > 0.0) ? (1.0 / cm[3]) : 0.0;
+        const double inv_W = (cm[3] > 0.0) ? (1.0 / cm[3]) : 0.0;
         for (int i = 0; i < np; ++i) {
-            mf_detail::remove_lattice_cm_impulse(pv, i, cm[0] * inv_B, cm[1] * inv_B, cm[2] * inv_B);
+            mf_detail::remove_lattice_cm_impulse(pv, i, cfg_, cm[0] * inv_W, cm[1] * inv_W, cm[2] * inv_W);
         }
 #endif
     }
@@ -860,9 +926,23 @@ public:
 #endif
     }
 
+    // Electrostatic field energy (1/2) int rho_Q(r) * Phi_Coul(r) d^3r in test-particle GeV units
+    double compute_coulomb_energy_test_gev(int n_test) const {
+        if (!cfg_.coulomb_enabled) return 0.0;
+        const auto hrq = rho_q_.to_vector();
+        const auto hphi = phi_coul_raw_.to_vector();
+        const double dV = gcfg_.cell_volume_fm3();
+        double e_coul = 0.0;
+        for (std::size_t c = 0; c < hrq.size(); ++c) {
+            e_coul += 0.5 * static_cast<double>(hrq[c]) * static_cast<double>(hphi[c]) * dV;
+        }
+        return static_cast<double>(n_test) * e_coul;
+    }
+
     // Total potential energy in test-particle GeV units (matches GlobalObservables::E_tot scale!)
     double compute_potential_energy_test_gev(int n_test) const {
-        if (!cfg_.enabled) return 0.0;
+        double e_tot = compute_coulomb_energy_test_gev(n_test);
+        if (!cfg_.enabled) return e_tot;
         const auto hrp = rho_p_.to_vector();
         const auto hrn = rho_n_.to_vector();
         const auto hpsi = psi_md_.to_vector();
@@ -880,13 +960,13 @@ public:
                 0.5 * cfg_.C_md_gev * rb * hpsi[c];
             e_phys += edens * dV;
         }
-        return static_cast<double>(n_test) * e_phys;
+        return e_tot + static_cast<double>(n_test) * e_phys;
     }
 
     // Symplectic manifold projection: rescales peculiar momenta p_i - A_i*p_cm so H(t) == H_target
     // to machine precision (<1e-12) while keeping total 3-momentum P_tot, B, and Q strictly invariant.
     void project_exact_hamiltonian(ParticleSystem& particles, int n_test, double H_target_test_gev) {
-        if (!cfg_.enabled) return;
+        if (!cfg_.is_active()) return;
         const int np = particles.slot_size();
         if (np == 0) return;
         ParticleSoAView pv = particles.view();
@@ -967,10 +1047,12 @@ public:
             rho_p_.data(), rho_n_.data(),
             px_sum_.data(), py_sum_.data(), pz_sum_.data(),
             psi_md_.data(), u_loc_p_.data(), u_loc_n_.data(),
-            u_md_dual_.data(), tmp_buf_.data()
+            u_md_dual_.data(), rho_q_.data(), phi_coul_.data(), tmp_buf_.data()
         };
     }
 
+    std::vector<Real> phi_coul_raw_host() const { return phi_coul_raw_.to_vector(); }
+    std::vector<Real> phi_coul_host() const { return phi_coul_.to_vector(); }
     const MeanFieldConfig& config() const { return cfg_; }
 
 private:
@@ -996,8 +1078,10 @@ private:
     GridConfig gcfg_;
     DeviceBuffer<Real> rho_p_, rho_n_;
     DeviceBuffer<Real> px_sum_, py_sum_, pz_sum_;
-    DeviceBuffer<Real> psi_md_, u_loc_p_, u_loc_n_, u_md_dual_, tmp_buf_;
+    DeviceBuffer<Real> psi_md_, u_loc_p_, u_loc_n_, u_md_dual_;
+    DeviceBuffer<Real> rho_q_, phi_coul_raw_, phi_coul_, tmp_buf_;
     DeviceBuffer<double> cm_accum_;
+    CoulombPoissonSolver poisson_solver_;
 };
 
 }  // namespace transport

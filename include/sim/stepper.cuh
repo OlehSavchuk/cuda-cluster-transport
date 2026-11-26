@@ -288,7 +288,7 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
 
     // If prob_tot > 1 (overflow), normalize channel selection within w_tot
     const double sel = (prob_tot <= 1.0) ? (u_draw / rate_prefactor) : (rng.uniform() * w_tot);
-    const bool use_med_ec = conserve_med_ec && mf_view.cfg.enabled;
+    const bool use_med_ec = conserve_med_ec && mf_view.cfg.is_active();
     const double x1 = p.x[idx1], y1 = p.y[idx1], z1 = p.z[idx1];
     const double x2 = p.x[idx2], y2 = p.y[idx2], z2 = p.z[idx2];
     const double Px_tot = p1_in.x + p2_in.x, Py_tot = p1_in.y + p2_in.y, Pz_tot = p1_in.z + p2_in.z;
@@ -526,7 +526,7 @@ HD_INLINE bool try_resonance_decay(ParticleSoAView& p,
     const double cos_theta = 1.0 - 2.0 * rng.uniform();
     const double phi = phys::TWO_PI * rng.uniform();
     FourVector pa_out{}, pb_out{};
-    if (conserve_med_ec && mf_view.cfg.enabled) {
+    if (conserve_med_ec && mf_view.cfg.is_active()) {
         const double omega_in = E_R + mf_detail::eval_particle_potential_gev(
                                           mf_view, res_id, rx, ry, rz, p_res.x, p_res.y, p_res.z);
         const double sth = ::sqrt((1.0 - cos_theta * cos_theta > 0.0) ? (1.0 - cos_theta * cos_theta) : 0.0);
@@ -757,7 +757,7 @@ public:
     //   Kick(dt/2) -> Drift(dt/2) -> Decay(dt/2) -> Collide(dt) -> Decay(dt/2) -> Drift(dt/2) -> Kick(dt/2)
     void step(ParticleSystem& particles, SpatialGrid& grid, MeanFieldGrid* mf = nullptr) {
         const double half_dt = 0.5 * step_cfg_.dt_fm;
-        const bool use_mf = (mf != nullptr && mf->config().enabled);
+        const bool use_mf = (mf != nullptr && mf->config().is_active());
 
         if (use_mf) {
             mf->rebuild_potentials(particles, step_cfg_.n_test);

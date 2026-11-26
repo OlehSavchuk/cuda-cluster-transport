@@ -1289,6 +1289,87 @@ void test_pauli_blocking_and_interacting_hcgf() {
                 f_core, 100.0 * static_cast<double>(blk_on) / std::max(1ULL, el_on + blk_on), T_q * 1.0e3, alpha_tot);
 }
 
+void test_poisson_coulomb_potential_and_energy_conservation() {
+    // 1. Uniform Z = 79 charged sphere of radius R = 6.8 fm in open 3D space [-24, 24]^3 fm
+    constexpr int Z = 79, N_NEUT = 118, NT = 120;
+    constexpr double R_SPH = 6.8;
+    std::vector<HostParticle> sph;
+    sph.reserve((Z + N_NEUT) * NT);
+    for (int i = 0; i < (Z + N_NEUT) * NT; ++i) {
+        PhiloxRng rng(314159ULL, 0ULL, static_cast<std::uint64_t>(i));
+        const bool is_p = (i < Z * NT);
+        const double r = R_SPH * std::cbrt(rng.uniform());
+        const double cth = 1.0 - 2.0 * rng.uniform();
+        const double sth = std::sqrt(std::max(0.0, 1.0 - cth * cth));
+        const double phi = phys::TWO_PI * rng.uniform();
+        HostParticle hp{};
+        hp.species = is_p ? PROTON : NEUTRON;
+        hp.mass = get_species_info(hp.species).pole_mass_gev;
+        hp.x = r * sth * std::cos(phi); hp.y = r * sth * std::sin(phi); hp.z = r * cth;
+        hp.E = hp.mass;
+        sph.push_back(hp);
+    }
+
+    GridConfig gcfg{}; gcfg.boundary = BoundaryMode::OpenExpanding;
+    gcfg.nx = 24; gcfg.ny = 24; gcfg.nz = 24;
+    gcfg.xmin = -24.0; gcfg.xmax = 24.0; gcfg.ymin = -24.0; gcfg.ymax = 24.0; gcfg.zmin = -24.0; gcfg.zmax = 24.0;
+
+    MeanFieldConfig c_only{}; c_only.enabled = false; c_only.coulomb_enabled = true; c_only.gaussian_smooth_passes = 0;
+    ParticleSystem ps0; ps0.upload(sph);
+    MeanFieldGrid mfg0(c_only, gcfg);
+    mfg0.rebuild_potentials(ps0, NT);
+
+    const double phi_c_exact = 1.5 * Z * phys::E2_COULOMB_GEV_FM / R_SPH;
+    const double phi_ext_exact = Z * phys::E2_COULOMB_GEV_FM / 15.0;
+    const double ecoul_exact = 0.6 * Z * Z * phys::E2_COULOMB_GEV_FM / R_SPH;
+    const double phi_c_num = mf_detail::sample_cic_scalar(mfg0.view().phi_coul, 0.0, 0.0, 0.0, gcfg);
+    const double phi_ext_num = mf_detail::sample_cic_scalar(mfg0.view().phi_coul, 15.0, 0.0, 0.0, gcfg);
+    const double ecoul_num = mfg0.compute_coulomb_energy_test_gev(NT) / NT;
+    TEST_ASSERT(std::fabs(phi_c_num - phi_c_exact) / phi_c_exact < 0.05 &&
+                std::fabs(phi_ext_num - phi_ext_exact) / phi_ext_exact < 0.03 &&
+                std::fabs(ecoul_num - ecoul_exact) / ecoul_exact < 0.05,
+                "3D Poisson open-boundary Coulomb potential/energy mismatch vs analytic sphere");
+
+    // 2. Pure Vlasov (MDSoft, Coulomb ON vs OFF): verify pure Coulomb radial push & exact H, P conservation
+    auto run_vlasov_sphere = [&](bool coul_on, double& pr_p_out, double& rel_dH_out, double& dP_out) {
+        MeanFieldConfig mf_cfg = make_mean_field_config(EOSPreset::MDSoft);
+        mf_cfg.coulomb_enabled = coul_on;
+        ParticleSystem ps; ps.upload(sph);
+        MeanFieldGrid mfg(mf_cfg, gcfg);
+        SpatialGrid sg(gcfg);
+        StepperConfig sc{}; sc.dt_fm = 0.20; sc.n_test = NT;
+        ReactionConfig rc{}; rc.enable_elastic = false; rc.enable_inelastic_2to2 = false; rc.enable_resonance_2to1_and_decays = false;
+        TransportStepper stp(sc, CrossSectionConfig{}, rc);
+        ObservableCalculator oc;
+
+        mfg.rebuild_potentials(ps, NT);
+        const GlobalObservables o0 = oc.compute(ps);
+        const double H0 = o0.E_tot + mfg.compute_potential_energy_test_gev(NT);
+        for (int s = 0; s < 30; ++s) stp.step(ps, sg, &mfg);
+        mfg.rebuild_potentials(ps, NT);
+        const GlobalObservables o1 = oc.compute(ps);
+        const double H1 = o1.E_tot + mfg.compute_potential_energy_test_gev(NT);
+
+        pr_p_out = 0.0;
+        for (const auto& hp : ps.download()) {
+            if (hp.species != PROTON) continue;
+            const double r = std::max(1.0e-6, std::sqrt(hp.x * hp.x + hp.y * hp.y + hp.z * hp.z));
+            pr_p_out += ((hp.x * hp.px + hp.y * hp.py + hp.z * hp.pz) / r) / (Z * NT);
+        }
+        rel_dH_out = std::fabs(H1 - H0) / std::fabs(H0);
+        dP_out = std::sqrt((o1.Px_tot - o0.Px_tot) * (o1.Px_tot - o0.Px_tot) +
+                           (o1.Py_tot - o0.Py_tot) * (o1.Py_tot - o0.Py_tot) +
+                           (o1.Pz_tot - o0.Pz_tot) * (o1.Pz_tot - o0.Pz_tot));
+    };
+    double pr_off = 0.0, dh_off = 0.0, dp_off = 0.0, pr_on = 0.0, dh_on = 0.0, dp_on = 0.0;
+    run_vlasov_sphere(false, pr_off, dh_off, dp_off);
+    run_vlasov_sphere(true,  pr_on,  dh_on,  dp_on);
+    TEST_ASSERT(pr_on - pr_off > 0.006 && dh_on < 3.0e-4 && dp_on < 1.0e-10,
+                "Coulomb Vlasov expansion failed proton radial push or Hamiltonian/momentum conservation");
+    std::printf("[PASS] test_poisson_coulomb_potential_and_energy_conservation (Phi0=%.2f/%.2f MeV, E_C=%.3f/%.3f GeV, dp_r_Coul=%+.1f MeV/c, |dH|/H=%.2e)\n",
+                phi_c_num * 1e3, phi_c_exact * 1e3, ecoul_num, ecoul_exact, (pr_on - pr_off) * 1e3, dh_on);
+}
+
 }  // namespace
 
 int main() {
@@ -1315,6 +1396,7 @@ int main() {
     test_a456_isotopes_and_cascade_decays();
     test_hcgf_pratt_torrieri_momentum_anisotropy();
     test_pauli_blocking_and_interacting_hcgf();
+    test_poisson_coulomb_potential_and_energy_conservation();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

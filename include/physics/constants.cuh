@@ -9,6 +9,8 @@ constexpr double PI = 3.14159265358979323846;
 constexpr double TWO_PI = 6.28318530717958647692;
 constexpr double HBARC = 0.1973269804;          // GeV * fm
 constexpr double HBARC_SQ = HBARC * HBARC;      // GeV^2 * fm^2
+constexpr double ALPHA_EM = 1.0 / 137.035999084;// Fine-structure constant e^2 / (4 pi eps_0 hbar c)
+constexpr double E2_COULOMB_GEV_FM = ALPHA_EM * HBARC;  // e^2 = alpha * hbar*c [GeV * fm] (~1.4400e-3)
 constexpr double MB_TO_FM2 = 0.1;               // 1 mb = 0.1 fm^2
 constexpr double FM2_TO_MB = 10.0;              // 1 fm^2 = 10 mb
 constexpr double MEV_TO_GEV = 1.0e-3;
