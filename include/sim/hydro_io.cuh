@@ -78,7 +78,7 @@ inline void write_hydro_grid_binary(const std::string& hydro_dir,
     if (nc <= 0) return;
     const double inv_n_dV = 1.0 / (static_cast<double>(n_test) * gcfg.cell_volume_fm3());
 
-    std::vector<double> rp(nc, 0.0), rn(nc, 0.0);
+    std::vector<double> rp(nc, 0.0), rn(nc, 0.0), rq(nc, 0.0);
     std::vector<double> jbx(nc, 0.0), jby(nc, 0.0), jbz(nc, 0.0);
     std::vector<double> t00(nc, 0.0), t0x(nc, 0.0), t0y(nc, 0.0), t0z(nc, 0.0);
     std::vector<double> tmp(nc, 0.0);
@@ -90,8 +90,9 @@ inline void write_hydro_grid_binary(const std::string& hydro_dir,
 
         const SpeciesInfo sp = get_species_info(hp.species);
         const double A = static_cast<double>(sp.baryon_num);
-        const double Z = static_cast<double>(sp.charge);
-        const double N = A - Z;
+        const double Q = static_cast<double>(sp.charge);
+        double wp = 0.0, wn = 0.0;
+        get_effective_pn_weights(hp.species, wp, wn);
         const double inv_E = 1.0 / hp.E;
 
         for (int dz = 0; dz <= 1; ++dz) {
@@ -104,8 +105,9 @@ inline void write_hydro_grid_binary(const std::string& hydro_dir,
                     const int ix = mf_detail::wrap_or_clamp_idx(i0 + dx, gcfg.nx, gcfg.boundary);
                     const double w = (((dx == 0) ? (1.0 - fx) : fx) * wy * wz) * inv_n_dV;
                     const int c = mf_detail::cell_flat(ix, iy, iz, gcfg);
-                    rp[c] += w * Z;
-                    rn[c] += w * N;
+                    rp[c] += w * wp;
+                    rn[c] += w * wn;
+                    rq[c] += w * Q;
                     jbx[c] += w * A * (hp.px * inv_E);
                     jby[c] += w * A * (hp.py * inv_E);
                     jbz[c] += w * A * (hp.pz * inv_E);
@@ -118,7 +120,7 @@ inline void write_hydro_grid_binary(const std::string& hydro_dir,
         }
     }
 
-    for (auto* vec : {&rp, &rn, &jbx, &jby, &jbz, &t00, &t0x, &t0y, &t0z}) {
+    for (auto* vec : {&rp, &rn, &rq, &jbx, &jby, &jbz, &t00, &t0x, &t0y, &t0z}) {
         hydro_detail::smooth_host_field_3d(*vec, tmp, gcfg);
     }
 
@@ -149,7 +151,7 @@ inline void write_hydro_grid_binary(const std::string& hydro_dir,
 
         f_rb_lab[c] = static_cast<float>(rb);
         f_rb_lrf[c] = static_cast<float>(rb_lrf);
-        f_rq_lab[c] = static_cast<float>(rp[c]);
+        f_rq_lab[c] = static_cast<float>(rq[c]);
         f_etot[c]   = static_cast<float>(e_tot);
         f_elrf[c]   = static_cast<float>(eps_lrf);
         if (e_kin > 1.0e-12) {

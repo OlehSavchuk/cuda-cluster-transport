@@ -127,10 +127,10 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
                             ? (kin.v_moller * elastic_cross_section_fm2(id1, id2, kin, xs_cfg))
                             : 0.0;
 
-    // 2. Binary inelastic 2 -> 2 channels (up to 20 matching channels for N + 4He)
-    int inel_out3[20];
-    int inel_out4[20];
-    double inel_w[20];
+    // 2. Binary inelastic 2 -> 2 channels (up to 24 matching channels)
+    int inel_out3[24];
+    int inel_out4[24];
+    double inel_w[24];
     int n_inel = 0;
     double w_inel_sum = 0.0;
 
@@ -140,7 +140,7 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
             const double w = inelastic_2to2_vmoller_sigma_fm2(
                 ch, id1, id2, p1_in, p2_in, kin.sqrt_s,
                 rxn_cfg.norms, rxn_cfg.inelastic_scale, o3, o4);
-            if (w > 0.0 && n_inel < 20) {
+            if (w > 0.0 && n_inel < 24) {
                 inel_out3[n_inel] = o3;
                 inel_out4[n_inel] = o4;
                 inel_w[n_inel] = w;
@@ -150,7 +150,7 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
         }
     }
 
-    // 3. s-channel 2 -> 1 Breit-Wigner resonance formation (a + b -> R)
+    // 3. s-channel 2 -> 1 Breit-Wigner resonance formation (a + b -> R, including pi + N -> Delta!)
     int form_res[18];
     double form_w[18];
     int n_form = 0;
@@ -163,7 +163,23 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
             const int B_tot = sp1.baryon_num + sp2.baryon_num;
             const int Z_tot = sp1.charge + sp2.charge;
 
-            if (B_tot == 2) {
+            if (B_tot == 1) {
+                int cand = -1;
+                if (Z_tot == -1) cand = DELTA_MINUS;
+                else if (Z_tot == 0) cand = DELTA_ZERO;
+                else if (Z_tot == 1) cand = DELTA_PLUS;
+                else if (Z_tot == 2) cand = DELTA_PLUSPLUS;
+                if (cand >= 0) {
+                    const double w = formation_vmoller_sigma_fm2(
+                        id1, id2, p1_in, p2_in, kin.sqrt_s, cand, rxn_cfg.norms);
+                    if (w > 0.0) {
+                        form_res[n_form] = cand;
+                        form_w[n_form] = w;
+                        w_form_sum += w;
+                        ++n_form;
+                    }
+                }
+            } else if (B_tot == 2) {
                 int cand = -1;
                 if (Z_tot == 0) cand = D_STAR_NN;
                 else if (Z_tot == 1) cand = D_STAR_PN;
@@ -291,8 +307,8 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
         double s_avail_sqrt = kin.sqrt_s;
         if (use_med_ec && (sp3.is_excited || sp4.is_excited)) {
             const double A_tot = static_cast<double>(sp3.baryon_num + sp4.baryon_num);
-            const double f3 = static_cast<double>(sp3.baryon_num) / A_tot;
-            const double f4 = static_cast<double>(sp4.baryon_num) / A_tot;
+            const double f3 = (A_tot > 0.0) ? (static_cast<double>(sp3.baryon_num) / A_tot) : 0.5;
+            const double f4 = 1.0 - f3;
             const double u0 = mf_detail::eval_particle_potential_gev(
                                   mf_view, out3, x1, y1, z1, f3 * Px_tot, f3 * Py_tot, f3 * Pz_tot) +
                               mf_detail::eval_particle_potential_gev(

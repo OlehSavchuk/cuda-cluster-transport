@@ -164,7 +164,7 @@ inline double sample_thermal_breit_wigner_mass(int res_id, double T_gev, PhiloxR
     const double th_max = std::atan((m_max * m_max - m0 * m0) / w0);
 
     const double n_ref = fixed_mass_mj_density_fm3(m_min, 1, T_gev, 0.0);
-    constexpr double RATIO_BOUND = 3.5;
+    constexpr double RATIO_BOUND = 8.5;
 
     for (int iter = 0; iter < 128; ++iter) {
         const double th = th_min + (th_max - th_min) * rng.uniform();
@@ -192,6 +192,8 @@ struct MixtureConfig {
     bool include_ground_clusters = true;
     bool include_excited_dstar = true;
     bool include_excited_he4 = true;
+    bool include_pions = false;
+    bool include_deltas = false;
     bool use_breit_wigner = true;
     double cluster_yield_boost = 1.0;
     double excited_yield_boost = 1.0;
@@ -205,7 +207,9 @@ inline std::vector<double> build_species_probabilities(double T_gev,
     std::vector<double> weights(NUM_SPECIES, 0.0);
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
-        if (sp.baryon_num == 1 && !mix.include_nucleons) continue;
+        if (is_pion(id) && !mix.include_pions) continue;
+        if (is_delta(id) && !mix.include_deltas) continue;
+        if (sp.baryon_num == 1 && !sp.is_excited && !mix.include_nucleons) continue;
         if (sp.baryon_num >= 2 && !sp.is_excited && !mix.include_ground_clusters) continue;
         if (sp.baryon_num == 2 && sp.is_excited && !mix.include_excited_dstar) continue;
         if (sp.baryon_num == 4 && sp.is_excited && !mix.include_excited_he4) continue;
@@ -239,7 +243,9 @@ inline int grand_canonical_test_particles(const GridConfig& grid,
     double n_tot_fm3 = 0.0;
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
-        if (sp.baryon_num == 1 && !mix.include_nucleons) continue;
+        if (is_pion(id) && !mix.include_pions) continue;
+        if (is_delta(id) && !mix.include_deltas) continue;
+        if (sp.baryon_num == 1 && !sp.is_excited && !mix.include_nucleons) continue;
         if (sp.baryon_num >= 2 && !sp.is_excited && !mix.include_ground_clusters) continue;
         if (sp.baryon_num == 2 && sp.is_excited && !mix.include_excited_dstar) continue;
         if (sp.baryon_num == 4 && sp.is_excited && !mix.include_excited_he4) continue;

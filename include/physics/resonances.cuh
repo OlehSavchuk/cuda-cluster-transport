@@ -111,6 +111,26 @@ HD_INLINE constexpr ResonanceDecaySpec get_decay_spec(int res_id) {
             spec.branches[0] = {PROTON, HELION, 1, 1.0};
             break;
 
+        // Delta(1232) (J^P = 3/2+, I = 3/2) -> N + pi (p-wave, L = 1) with exact Clebsch-Gordan weights
+        case DELTA_MINUS:
+            spec.n_branches = 1;
+            spec.branches[0] = {NEUTRON, PION_MINUS, 1, 1.0};
+            break;
+        case DELTA_ZERO:
+            spec.n_branches = 2;
+            spec.branches[0] = {NEUTRON, PION_ZERO,  1, 2.0 / 3.0};
+            spec.branches[1] = {PROTON,  PION_MINUS, 1, 1.0 / 3.0};
+            break;
+        case DELTA_PLUS:
+            spec.n_branches = 2;
+            spec.branches[0] = {PROTON,  PION_ZERO,  1, 2.0 / 3.0};
+            spec.branches[1] = {NEUTRON, PION_PLUS,  1, 1.0 / 3.0};
+            break;
+        case DELTA_PLUSPLUS:
+            spec.n_branches = 1;
+            spec.branches[0] = {PROTON, PION_PLUS, 1, 1.0};
+            break;
+
         default:
             spec.n_branches = 0;
             break;
@@ -333,9 +353,10 @@ HD_INLINE double sample_breit_wigner_2to2_mass(int res_id,
     if (p_max <= 0.0) return 0.5 * (m_min + upper);
 
     // Safe upper bound on ratio (A_raw(m) dm / Lorentzian_proposal(m^2) dm^2) * (p_cm / p_max)
-    constexpr double RATIO_BOUND = 3.2;
+    // across both narrow nuclear states and broad p-wave Delta(1232) up to m_max
+    constexpr double RATIO_BOUND = 8.5;
 
-    for (int iter = 0; iter < 64; ++iter) {
+    for (int iter = 0; iter < 128; ++iter) {
         const double th = th_min + (th_max - th_min) * rng.uniform();
         const double m2 = m0 * m0 + w0 * ::tan(th);
         if (m2 <= m_min * m_min || m2 >= upper * upper) continue;

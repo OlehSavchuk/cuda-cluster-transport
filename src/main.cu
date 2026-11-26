@@ -109,7 +109,9 @@ void write_binary_frame(const std::string& dump_dir,
     }
 
     int n_a4_exc = 0;
-    for (int id = HE4_2021; id < NUM_SPECIES; ++id) n_a4_exc += obs.counts[id];
+    for (int id = 0; id < NUM_SPECIES; ++id) {
+        if (is_a4_excited(id)) n_a4_exc += obs.counts[id];
+    }
 
     FrameHeader hdr{};
     hdr.step = step;
@@ -175,11 +177,13 @@ void dump_breit_wigner_curves(const std::string& path) {
     std::ofstream f(path);
     f << "species_id,name,m_gev,dm_above_th_mev,A_gev_inv,gamma_tot_mev\n";
 
-    const int showcase_ids[] = {D_STAR_PN, HE4_2021, HE4_2184, HE4_2425, HE4_2595, HE4_2742, H4_RES};
+    const int showcase_ids[] = {D_STAR_PN, HE4_2021, HE4_2184, HE4_2425, HE4_2595, HE4_2742, H4_RES, DELTA_PLUS};
     for (int id : showcase_ids) {
+        const SpeciesInfo sp = get_species_info(id);
         const double m_min = resonance_min_mass(id);
-        const double m_0 = get_species_info(id).pole_mass_gev;
-        const double m_hi = m_0 + 0.045;  // Up to 45 MeV above pole for clean plotting
+        const double m_0 = sp.pole_mass_gev;
+        const double span = (3.0 * sp.width_gev > 0.045) ? (3.0 * sp.width_gev) : 0.045;
+        const double m_hi = m_0 + span;
         constexpr int N_PTS = 300;
         for (int k = 0; k < N_PTS; ++k) {
             const double m = m_min + (m_hi - m_min) * (static_cast<double>(k) + 0.5) / N_PTS;
@@ -287,6 +291,7 @@ void print_usage(const char* prog) {
         "  --box <float>                      Box length L [fm] (default: 20.0)\n"
         "  --grid <int>                       Grid cells per axis Nx=Ny=Nz (default: 10)\n"
         "  --temp <float>                     Temperature T [MeV] (default: 55.0)\n"
+        "  --include-pions                    Include thermal pi & Delta(1232) in initial box/fireball\n"
         "  --cluster-boost <float>            Initial statistical cluster boost (default: 1.0)\n"
         "  --excited-boost <float>            Initial statistical excited boost (default: 1.0)\n"
         "  --xs <glauber|const>               Elastic cross-section model (default: glauber)\n"
@@ -322,6 +327,7 @@ int main(int argc, char** argv) {
     double box_L = 20.0;
     int grid_n = 10;
     double temp_mev = 55.0;
+    bool init_thermal_pions = false;
     double cluster_boost = 1.0;
     double excited_boost = 1.0;
     int A_nuc = 197;
@@ -394,6 +400,8 @@ int main(int argc, char** argv) {
             grid_n = std::stoi(next_str());
         } else if (arg == "--temp") {
             temp_mev = std::stod(next_str());
+        } else if (arg == "--include-pions") {
+            init_thermal_pions = true;
         } else if (arg == "--cluster-boost") {
             cluster_boost = std::stod(next_str());
         } else if (arg == "--excited-boost") {
@@ -479,6 +487,8 @@ int main(int argc, char** argv) {
     gcfg.nz = grid_n;
 
     MixtureConfig mix{};
+    mix.include_pions = init_thermal_pions;
+    mix.include_deltas = init_thermal_pions;
     mix.use_breit_wigner = (rxn_mode != "elastic");
     mix.cluster_yield_boost = cluster_boost;
     mix.excited_yield_boost = excited_boost;
@@ -561,10 +571,10 @@ int main(int argc, char** argv) {
                 !mf_cfg.enabled ? "OFF" : (step_cfg.exact_hamiltonian_projection ? "EXACT"
                                           : (step_cfg.in_medium_energy_conservation ? "ON" : "OFF")));
     std::printf("=======================================================================================\n");
-    std::printf("%5s %7s %7s %7s %6s %6s %5s %6s %9s %8s %8s %8s\n",
-                "Step", "t[fm/c]", "N(p,n)", "d", "d*", "t+3He", "4He", "4He*",
+    std::printf("%5s %7s %7s %6s %6s %6s %5s %6s %6s %6s %9s %8s %8s %8s\n",
+                "Step", "t[fm/c]", "N(p,n)", "d", "d*", "t+3He", "4He", "4He*", "Delta", "pi",
                 "Elast", "Inel22", "Form21", "Decay12");
-    std::printf("---------------------------------------------------------------------------------------\n");
+    std::printf("-----------------------------------------------------------------------------------------------------\n");
 
     ParticleSystem particles;
     particles.upload(host_init);
@@ -583,7 +593,7 @@ int main(int argc, char** argv) {
     if (!csv_path.empty()) {
         csv.open(csv_path);
         csv << "step,t_fm,n_active,E_kin_gev,E_pot_gev,H_tot_gev,rho_contrast,Pz_over_Pperp,R_rms_fm,"
-               "n_nuc,n_d,n_dstar,n_a3,n_he4,n_a4star,"
+               "n_nuc,n_d,n_dstar,n_a3,n_he4,n_a4star,n_delta,n_pi,"
                "el_cum,inel22_cum,form21_cum,decay12_cum,max_P\n";
     }
 
@@ -608,11 +618,16 @@ int main(int argc, char** argv) {
             const int n_a3 = obs.counts[TRITON] + obs.counts[HELION];
             const int n_he4 = obs.counts[ALPHA];
             int n_a4_exc = 0;
-            for (int id = HE4_2021; id < NUM_SPECIES; ++id) n_a4_exc += obs.counts[id];
+            for (int id = 0; id < NUM_SPECIES; ++id) {
+                if (is_a4_excited(id)) n_a4_exc += obs.counts[id];
+            }
+            const int n_delta = obs.counts[DELTA_MINUS] + obs.counts[DELTA_ZERO] +
+                                obs.counts[DELTA_PLUS] + obs.counts[DELTA_PLUSPLUS];
+            const int n_pi = obs.counts[PION_MINUS] + obs.counts[PION_ZERO] + obs.counts[PION_PLUS];
 
             if (step % report_every == 0 || step == n_steps) {
-                std::printf("%5d %7.2f %7d %7d %6d %6d %5d %6d %9llu %8llu %8llu %8llu\n",
-                            step, t_now, n_nuc, n_d, n_dstar, n_a3, n_he4, n_a4_exc,
+                std::printf("%5d %7.2f %7d %6d %6d %6d %5d %6d %6d %6d %9llu %8llu %8llu %8llu\n",
+                            step, t_now, n_nuc, n_d, n_dstar, n_a3, n_he4, n_a4_exc, n_delta, n_pi,
                             st.collisions_elastic, st.collisions_inelastic_2to2,
                             st.formations_2to1, st.decays_1to2);
 
@@ -625,6 +640,7 @@ int main(int argc, char** argv) {
                         << obs.pressure_anisotropy() << "," << obs.rms_radius() << ","
                         << n_nuc << "," << n_d << "," << n_dstar << ","
                         << n_a3 << "," << n_he4 << "," << n_a4_exc << ","
+                        << n_delta << "," << n_pi << ","
                         << st.collisions_elastic << "," << st.collisions_inelastic_2to2 << ","
                         << st.formations_2to1 << "," << st.decays_1to2 << "," << st.max_prob_seen << "\n";
                 }

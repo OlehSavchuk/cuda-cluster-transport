@@ -121,28 +121,51 @@ HD_INLINE double elastic_cross_section_fm2(int id1, int id2,
     const SpeciesInfo sp2 = get_species_info(id2);
 
     const int A1 = sp1.baryon_num;
-    const int Z1 = sp1.charge;
-    const int N1 = A1 - Z1;
-
     const int A2 = sp2.baryon_num;
-    const int Z2 = sp2.charge;
-    const int N2 = A2 - Z2;
 
-    // Elementary Nucleon-Nucleon channel (p+p, n+n, p+n)
+    // Pion-Pion and Pion-Baryon/Cluster non-resonant elastic scattering
+    // (Resonant P33 pi + N -> Delta -> pi + N is generated dynamically by 2 <-> 1 channels!)
+    if (A1 == 0 && A2 == 0) {
+        return 12.0 * MB_TO_FM2;
+    }
+    if (A1 == 0 || A2 == 0) {
+        const SpeciesInfo sp_b = (A1 == 0) ? sp2 : sp1;
+        const SpeciesInfo sp_pi = (A1 == 0) ? sp1 : sp2;
+        const double sig_piN_bg_fm2 =
+            (10.0 / (1.0 + 0.25 * kin.p_cm * kin.p_cm) + 2.0) * MB_TO_FM2;
+        if (sp_b.baryon_num == 1) {
+            return sig_piN_bg_fm2;
+        }
+        const double Rb = sp_b.rms_radius_fm * (sp_b.is_excited ? cfg.excited_radius_scale : 1.0);
+        const double Rpi = sp_pi.rms_radius_fm;
+        const double a_sq = (2.0 / 3.0) * (Rb * Rb + Rpi * Rpi);
+        const double geom_area_fm2 = PI * a_sq;
+        const double opacity = (static_cast<double>(sp_b.baryon_num) * sig_piN_bg_fm2) / geom_area_fm2;
+        return geom_area_fm2 * ::log1p(opacity);
+    }
+
+    // Elementary Baryon-Baryon channel (p, n, Delta)
     if (A1 == 1 && A2 == 1) {
-        const bool same_iso = (Z1 == Z2);
+        if (is_delta(id1) || is_delta(id2)) {
+            const double s_same = sigma_nn_elastic_mb(true, kin.gamma_rel, cfg.sigma_nn_max_mb);
+            const double s_diff = sigma_nn_elastic_mb(false, kin.gamma_rel, cfg.sigma_nn_max_mb);
+            return 0.5 * (s_same + s_diff) * MB_TO_FM2;
+        }
+        const bool same_iso = (sp1.charge == sp2.charge);
         return sigma_nn_elastic_mb(same_iso, kin.gamma_rel, cfg.sigma_nn_max_mb) * MB_TO_FM2;
     }
 
-    // Nucleon-Cluster or Cluster-Cluster (including d*, 4He*, 4H*, 4Li*):
-    // Evaluate elementary pp/nn and np cross sections at the same relative Lorentz factor gamma_rel.
+    // Baryon-Cluster or Cluster-Cluster (including Delta, d*, 4He*, 4H*, 4Li*):
     const double sig_same_fm2 =
         sigma_nn_elastic_mb(true, kin.gamma_rel, cfg.sigma_nn_max_mb) * MB_TO_FM2;
     const double sig_diff_fm2 =
         sigma_nn_elastic_mb(false, kin.gamma_rel, cfg.sigma_nn_max_mb) * MB_TO_FM2;
 
-    const double n_same = static_cast<double>(Z1 * Z2 + N1 * N2);
-    const double n_diff = static_cast<double>(Z1 * N2 + N1 * Z2);
+    double Z1 = 0.0, N1 = 0.0, Z2 = 0.0, N2 = 0.0;
+    get_effective_pn_weights(id1, Z1, N1);
+    get_effective_pn_weights(id2, Z2, N2);
+    const double n_same = Z1 * Z2 + N1 * N2;
+    const double n_diff = Z1 * N2 + N1 * Z2;
     const double ab_prod = static_cast<double>(A1 * A2);
     const double sig_nn_avg_fm2 = (n_same * sig_same_fm2 + n_diff * sig_diff_fm2) / ab_prod;
 

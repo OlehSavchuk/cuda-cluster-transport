@@ -1,10 +1,10 @@
 # CUDA Relativistic Nucleon & Light-Cluster Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-13%2F13%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-15%2F15%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A GPU-native relativistic Vlasov–Boltzmann (BUU) transport code written in **CUDA C++17** for **protons, neutrons, and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), heavy-ion collision initialization & FOPI anisotropic flow observables ($v_1, v_2, dN/dy$), binary 3D local energy & baryon density grid output (`CHYD`), off-shell Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay, 46 reversible $2 \leftrightarrow 2$ inelastic nuclear channels, and Glauber elastic scattering**.
+A GPU-native relativistic Vlasov–Boltzmann (BUU) transport code written in **CUDA C++17** for **protons, neutrons, pions ($\pi^-, \pi^0, \pi^+$), $\Delta(1232)$ resonances ($\Delta^-, \Delta^0, \Delta^+, \Delta^{++}$), and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), heavy-ion collision initialization & FOPI anisotropic flow observables ($v_1, v_2, dN/dy$), binary 3D local energy & baryon density grid output (`CHYD`), off-shell Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay ($\pi N \leftrightarrow \Delta$, $NN \leftrightarrow d^*$, $N A_3 / dd \leftrightarrow {}^4\text{He}^*$), 57 reversible $2 \leftrightarrow 2$ inelastic hadronic/nuclear channels ($NN \leftrightarrow N\Delta$, $NN \leftrightarrow d\pi$, $\pi N$ charge exchange, cluster transfer & catalysis), and Glauber elastic scattering**.
 
 When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaussian smearing, dynamic slot compaction, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic reaction/decay kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
 
@@ -29,7 +29,14 @@ Direct benchmark against published **FOPI Collaboration experimental data** (W. 
   <img src="assets/fopi_auau250_flow.png" alt="FOPI Au + Au 250 A MeV dN/dy, v1, and v2 Flow" width="100%">
 </p>
 
-### 2. `FP64` (`double`) vs. `FP32` (`float`) Precision Benchmark (`cluster_transport` vs. `cluster_transport_fp32`)
+### 2. Pion ($\pi^-, \pi^0, \pi^+$) & $\Delta(1232)$ Isobar Transport (`scripts/generate_pion_delta_physics.py`)
+Coupled $\Delta(1232)$ $p$-wave Breit–Wigner spectral transport ($m_0 = 1.232\;\text{GeV}, \Gamma_0 = 118\;\text{MeV}$), resonant $\pi N \leftrightarrow \Delta$ ($\sigma_{\pi^+ p \to \Delta^{++}} = 193\;\text{mb}$, $3:1$ Clebsch–Gordan ratio to $\pi^- p \to \Delta^0$), isospin-$I=1$ $NN \leftrightarrow N\Delta$ and $NN \leftrightarrow d\pi$ reactions, and $\text{Au}+\text{Au}$ pion excitation functions ($0.25\text{–}1.2\,A\;\text{GeV}$), $\pi^-/\pi^+$ ratios, rapidity spectra, and flow vs. FOPI data:
+
+<p align="center">
+  <img src="assets/pion_delta_physics.png" alt="Pion and Delta(1232) Isobar Transport Physics and FOPI Benchmark" width="100%">
+</p>
+
+### 3. `FP64` (`double`) vs. `FP32` (`float`) Precision Benchmark (`cluster_transport` vs. `cluster_transport_fp32`)
 CMake builds both `cluster_transport` (`double`, 64-bit) and `cluster_transport_fp32` (`float`, 32-bit, `-DTRANSPORT_SINGLE_PRECISION=1`, unlocking $12.7\;\text{TFLOPS}$ FP32 pipes & hardware FP32 L2 atomics on consumer GeForce GPUs). Because `kinematics.cuh` uses the cancellation-free identity $Q^2 = |E_2\vec{p}_1 - E_1\vec{p}_2|^2 - |\vec{p}_1 \times \vec{p}_2|^2$, `FP32` avoids catastrophic near-threshold failure for boosted $A=4$ clusters and reproduces `FP64` FOPI $dN/dy_0$, $v_1(y_0)$, $v_2(u_{t0})$, and cluster yields within statistical precision:
 
 <p align="center">
@@ -140,12 +147,12 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 │   │   ├── cuda_compat.cuh         # DeviceBuffer<T>, atomic wrappers, CUDA/CPU portability macros
 │   │   └── philox_rng.cuh          # Stateless counter-based Philox4x32-10 PRNG (zero VRAM state)
 │   ├── physics/
-│   │   ├── constants.cuh           # Physical constants & AME2020 nuclear masses (GeV, fm)
-│   │   ├── species.cuh             # 28-species nucleon + cluster + excited-state table
+│   │   ├── constants.cuh           # Physical constants, nucleon, pion, Delta & AME2020 masses
+│   │   ├── species.cuh             # 35-species nucleon + pion + Delta + cluster + excited table
 │   │   ├── kinematics.cuh          # Cancellation-free Moller flux, CM boosts, 2->2 & 1->2 decays
-│   │   ├── cross_sections.cuh      # ERE+KK+Cugnon NN & Gaussian Glauber cluster cross sections
+│   │   ├── cross_sections.cuh      # ERE+KK+Cugnon NN, pi-hadron & Gaussian Glauber cross sections
 │   │   ├── resonances.cuh          # Relativistic Breit-Wigner spectral functions & BW samplers
-│   │   ├── inelastic_channels.cuh  # 46 reversible 2<->2 transfer, catalysis & excitation rules
+│   │   ├── inelastic_channels.cuh  # 57 reversible 2<->2 NN<->NDelta, dpi, transfer & excitation rules
 │   │   └── mean_field.cuh          # Skyrme + Lorentzian MD potential, CIC Vlasov & smoothing
 │   └── sim/
 │       ├── particles.cuh           # Dynamic SoA layout with GPU atomic appends & compaction
@@ -240,7 +247,9 @@ python3 scripts/generate_animations.py
 10. **`test_eos_saturation_and_md`**: Verifies exact cold-matter saturation ($E/A(\rho_0) = -16.00\;\text{MeV}$, $P(\rho_0)=0$, $K_0 = 200/215/380\;\text{MeV}$), optical-potential zero crossing ($U(0)=-72.2\;\text{MeV} \to U(1\;\text{GeV}/c)=+10.7\;\text{MeV}$), and Landau effective mass $m^*(p_F)/m = 0.692$.
 11. **`test_vlasov_and_spinodal`**: Verifies symplectic Velocity-Verlet Hamiltonian conservation ($|\Delta H|/H \approx 1.0 \times 10^{-5}$ with $\nabla_{\vec{r}}\vec{p}_f$ product-rule force), exact CIC lattice momentum conservation ($|\Delta\vec{P}| \sim 10^{-13}\;\text{GeV}/c$), and spinodal density-contrast amplification.
 12. **`test_hic_and_hydro_binary_output`**: Verifies Woods–Saxon + Thomas–Fermi $\text{Au}+\text{Au}$ CM initialization ($|\vec{P}_{\text{tot}}| < 10^{-11}\;\text{GeV}/c$) and binary `CHYD` 3D density grid conservation ($\int \rho_{B,\text{lab}}\,dV = 2 A_{\text{nuc}}$).
-13. **`test_in_medium_collision_energy_conservation`**: Verifies `--in-medium-ec <off|on|exact>` across coupled $2\leftrightarrow 2$ and $2\leftrightarrow 1$ reactions under `MDStiff`, reducing $|\Delta H|/H$ from $2.02 \times 10^{-3}$ (`off`) $\to 3.01 \times 10^{-6}$ (`on`, per-vertex quasi-energy root solver) $\to 1.05 \times 10^{-14}$ (`exact`, + Hamiltonian manifold projection).
+13. **`test_in_medium_collision_energy_conservation`**: Verifies `--in-medium-ec <off|on|exact>` across coupled $2\leftrightarrow 2$ and $2\leftrightarrow 1$ reactions under `MDStiff`, reducing $|\Delta H|/H$ from $1.93 \times 10^{-3}$ (`off`) $\to 2.32 \times 10^{-5}$ (`on`, per-vertex quasi-energy root solver) $\to 1.86 \times 10^{-14}$ (`exact`, + Hamiltonian manifold projection).
+14. **`test_pion_delta_cross_sections_and_detailed_balance`**: Verifies PDG $\pi^+ p \to \Delta^{++}$ (`192.8 mb`) & $\pi^- p \to \Delta^0$ (`64.2 mb`) $3:1$ Clebsch–Gordan cross sections and grand-canonical $\pi\text{–}\Delta\text{–}N\text{–}d$ detailed balance with exact signed electric charge ($\Delta Q = 0$) conservation.
+15. **`test_hic_pion_and_delta_production`**: Verifies dynamical $\Delta(1232)$ excitation, $\pi^-/\pi^+$ neutron-rich isospin asymmetry, and machine-precision Hamiltonian conservation (`|dH|/H = 1.24e-15`) in $\text{Au}+\text{Au}$ @ $800\,A\;\text{MeV}$.
 
 ## Roadmap
 - [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA
@@ -248,4 +257,5 @@ python3 scripts/generate_animations.py
 - [x] Reversible $2 \leftrightarrow 2$ nuclear transfer ($dd \leftrightarrow pt/n\,{}^3\text{He}$, $dt \leftrightarrow n\alpha$, $d\,{}^3\text{He} \leftrightarrow p\alpha$), deuteron catalysis ($N+d \leftrightarrow N+d^*$), and ${}^4\text{He} \leftrightarrow {}^4\text{He}^*$ excitation with off-shell detailed balance
 - [x] Skyrme + Lorentzian momentum-dependent mean-field potential (`SkyrmeSoft`, `MDSoft`, `MDStiff`) with baryon/isospin-additive cluster folding and symplectic CIC Vlasov kernels
 - [x] Heavy-ion collision initialization (`--mode hic`), FOPI flow observables ($v_1, v_2, dN/dy$), and binary 3D local energy & baryon density grid output (`CHYD`)
+- [x] Pion ($\pi^-, \pi^0, \pi^+$) and $\Delta(1232)$ ($\Delta^-, \Delta^0, \Delta^+, \Delta^{++}$) spectral transport with $\pi N \leftrightarrow \Delta$, $NN \leftrightarrow N\Delta$, and $NN \leftrightarrow d\pi$ detailed balance
 - [ ] GPU 6D phase-space Pauli blocking $(1 - f_3)(1 - f_4)$ & Bose enhancement + direct $2 \leftrightarrow 3$ channels

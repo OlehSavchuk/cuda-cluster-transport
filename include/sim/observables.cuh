@@ -57,7 +57,8 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
 
     double lE = 0.0, lPx = 0.0, lPy = 0.0, lPz = 0.0;
     double lTxx = 0.0, lTyy = 0.0, lTzz = 0.0, lr2 = 0.0;
-    unsigned long long lB = 0ULL, lQ = 0ULL, lAct = 0ULL;
+    unsigned long long lB = 0ULL, lAct = 0ULL;
+    long long lQ = 0LL;
 
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < p.n; i += blockDim.x * gridDim.x) {
         if (!p.active[i]) continue;
@@ -81,7 +82,7 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
         lr2 += p.x[i] * p.x[i] + p.y[i] * p.y[i] + p.z[i] * p.z[i];
 
         lB += static_cast<unsigned long long>(sp.baryon_num);
-        lQ += static_cast<unsigned long long>(sp.charge);
+        lQ += static_cast<long long>(sp.charge);
         lAct += 1ULL;
 
         atomicAdd(&d_counts[sp_id], 1);
@@ -99,7 +100,7 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
     portable_atomic_add_double(&sh_sc[7], lr2);
 
     if (lB > 0) atomicAdd(&d_bq[0], lB);
-    if (lQ > 0) atomicAdd(&d_bq[1], lQ);
+    if (lQ != 0LL) atomicAdd(&d_bq[1], static_cast<unsigned long long>(lQ));
     if (lAct > 0) atomicAdd(&d_bq[2], lAct);
     __syncthreads();
 

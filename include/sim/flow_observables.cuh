@@ -76,9 +76,9 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
     const double y0_norm = (y_cm_beam > 1.0e-6) ? y_cm_beam : 0.35723;
     const double u_proj = std::sinh(y0_norm);  // FOPI projectile 4-velocity beta_p * gamma_p in CM
 
-    // 7 categories: 0=p, 1=n, 2=d, 3=t, 4=3He, 5=A3(t+3He), 6=4He
-    constexpr int N_CAT = 7;
-    const char* cat_names[N_CAT] = {"p", "n", "d", "t", "3He", "A3", "4He"};
+    // 10 categories: 0=p, 1=n, 2=d, 3=t, 4=3He, 5=A3(t+3He), 6=4He, 7=pi-, 8=pi0, 9=pi+
+    constexpr int N_CAT = 10;
+    const char* cat_names[N_CAT] = {"p", "n", "d", "t", "3He", "A3", "4He", "pi-", "pi0", "pi+"};
 
     constexpr int N_YBINS = 18;
     constexpr double Y0_MIN = -1.44, Y0_MAX = 1.44;
@@ -155,7 +155,10 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
         } else if (hp.species == HELION) {
             add_to_cat(4, yb, y0, pt, ut0, hp.px, hp.py);
             add_to_cat(5, yb, y0, pt, ut0, hp.px, hp.py);
-        } else if (hp.species == ALPHA) add_to_cat(6, yb, y0, pt, ut0, hp.px, hp.py);
+        } else if (hp.species == ALPHA)      add_to_cat(6, yb, y0, pt, ut0, hp.px, hp.py);
+        else if (hp.species == PION_MINUS)   add_to_cat(7, yb, y0, pt, ut0, hp.px, hp.py);
+        else if (hp.species == PION_ZERO)    add_to_cat(8, yb, y0, pt, ut0, hp.px, hp.py);
+        else if (hp.species == PION_PLUS)    add_to_cat(9, yb, y0, pt, ut0, hp.px, hp.py);
     }
 
     std::printf("\n=== FOPI Freeze-Out Yields & Midrapidity Squeeze-Out v2 (|y0|<0.4, u_t0>0.8) ===\n");

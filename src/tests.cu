@@ -35,22 +35,32 @@ using namespace transport;
     } while (0)
 
 void test_species_table() {
-    int n_excited = 0;
+    int n_excited = 0, n_mesons = 0;
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
         TEST_ASSERT(sp.id == id, "Species ID mismatch");
-        TEST_ASSERT(sp.baryon_num >= 1 && sp.baryon_num <= 4, "Baryon number out of range");
-        TEST_ASSERT(sp.charge >= 0 && sp.charge <= 3, "Charge out of range");
+        TEST_ASSERT(sp.baryon_num >= 0 && sp.baryon_num <= 4, "Baryon number out of range");
+        TEST_ASSERT(sp.charge >= -1 && sp.charge <= 3, "Charge out of range");
         TEST_ASSERT(sp.degeneracy == sp.two_J + 1, "Spin degeneracy mismatch g != 2J + 1");
-        TEST_ASSERT(sp.pole_mass_gev > 0.90 * sp.baryon_num, "Unphysical pole mass");
+        if (sp.baryon_num == 0) {
+            ++n_mesons;
+            TEST_ASSERT(sp.pole_mass_gev > 0.13 && sp.pole_mass_gev < 0.15, "Unphysical pion mass");
+        } else {
+            TEST_ASSERT(sp.pole_mass_gev > 0.90 * sp.baryon_num, "Unphysical baryon/cluster pole mass");
+        }
         TEST_ASSERT(sp.rms_radius_fm > 0.5, "Unphysical RMS radius");
+        double wp = -1.0, wn = -1.0;
+        get_effective_pn_weights(id, wp, wn);
+        TEST_ASSERT(wp >= 0.0 && wn >= 0.0 && std::fabs((wp + wn) - sp.baryon_num) < 1.0e-12,
+                    "Effective p/n weights must be non-negative and sum to baryon number A");
         if (sp.is_excited) {
             ++n_excited;
             TEST_ASSERT(sp.width_gev > 0.0, "Excited state must have positive width");
         }
     }
-    TEST_ASSERT(n_excited == 22, "Expected 22 excited A=2 and A=4 cluster states");
-    std::printf("[PASS] test_species_table (28 species: 6 ground + 22 excited states)\n");
+    TEST_ASSERT(n_mesons == 3 && n_excited == 26,
+                "Expected 3 pions + 26 excited states (4 Delta + 22 nuclear)");
+    std::printf("[PASS] test_species_table (35 species: 9 ground hadrons/nuclei + 26 resonances)\n");
 }
 
 void test_relativistic_kinematics() {
@@ -458,7 +468,9 @@ void test_dynamic_cluster_nucleosynthesis() {
     const int n_a3 = obs1.counts[TRITON] + obs1.counts[HELION];
     const int n_he4 = obs1.counts[ALPHA];
     int n_a4star = 0;
-    for (int id = HE4_2021; id < NUM_SPECIES; ++id) n_a4star += obs1.counts[id];
+    for (int id = 0; id < NUM_SPECIES; ++id) {
+        if (is_a4_excited(id)) n_a4star += obs1.counts[id];
+    }
 
     TEST_ASSERT(n_d > 200, "Failed to catalyze ground-state deuterons from pure nucleons");
     TEST_ASSERT(n_dstar > 200, "Failed to form singlet d* resonances from pure nucleons");
@@ -768,6 +780,129 @@ void test_in_medium_collision_energy_conservation() {
                 dH_off, dH_on, dH_ex, dP_ex);
 }
 
+void test_pion_delta_cross_sections_and_detailed_balance() {
+    const SpectralNormTable norms = compute_spectral_norm_table();
+    const double mp = get_species_info(PROTON).pole_mass_gev;
+    const double mpi = get_species_info(PION_PLUS).pole_mass_gev;
+    const double m0 = get_species_info(DELTA_PLUSPLUS).pole_mass_gev;
+    const double q0 = two_body_p_cm(m0, mp, mpi);
+    const FourVector p_p{std::sqrt(mp * mp + q0 * q0), 0.0, 0.0, q0};
+    const FourVector p_pi{std::sqrt(mpi * mpi + q0 * q0), 0.0, 0.0, -q0};
+    const PairKinematics kin = compute_pair_kinematics(p_p, mp, p_pi, mpi);
+
+    const double sig_dpp_mb =
+        (formation_vmoller_sigma_fm2(PROTON, PION_PLUS, p_p, p_pi, m0, DELTA_PLUSPLUS, norms) / kin.v_moller) *
+        phys::FM2_TO_MB;
+    const double sig_d0_mb =
+        (formation_vmoller_sigma_fm2(PROTON, PION_MINUS, p_p, p_pi, m0, DELTA_ZERO, norms) / kin.v_moller) *
+        phys::FM2_TO_MB;
+    TEST_ASSERT(sig_dpp_mb > 180.0 && sig_dpp_mb < 220.0, "Expected PDG ~198 mb peak for pi+ p -> Delta++");
+    TEST_ASSERT(std::fabs(sig_dpp_mb / sig_d0_mb - 3.0) < 0.02, "Expected 3:1 Clebsch-Gordan ratio (Delta++ / Delta0)");
+
+    // Grand-canonical detailed balance of (N, d, pi-, pi0, pi+, Delta-, Delta0, Delta+, Delta++) at T = 105 MeV
+    GridConfig gcfg{};
+    gcfg.boundary = BoundaryMode::PeriodicBox;
+    gcfg.nx = 8; gcfg.ny = 8; gcfg.nz = 8;
+    gcfg.xmin = 0.0; gcfg.xmax = 16.0;
+    gcfg.ymin = 0.0; gcfg.ymax = 16.0;
+    gcfg.zmin = 0.0; gcfg.zmax = 16.0;
+
+    MixtureConfig mix{};
+    mix.include_ground_clusters = true;
+    mix.include_excited_dstar = false;
+    mix.include_excited_he4 = false;
+    mix.include_pions = true;
+    mix.include_deltas = true;
+
+    const double T_gev = 0.105, mu_B_gev = 0.720;
+    const int n_test = 25;
+    const int n_init = grand_canonical_test_particles(gcfg, n_test, T_gev, mu_B_gev, 0.0, mix);
+    auto host_p = init_box_ensemble(n_init, gcfg, T_gev, T_gev, mu_B_gev, 0.0, mix, 9191ULL);
+
+    ParticleSystem ps; ps.upload(host_p);
+    SpatialGrid grid(gcfg);
+    StepperConfig sc{}; sc.dt_fm = 0.08; sc.n_test = n_test; sc.collision_substeps = 2;
+    TransportStepper stepper(sc, CrossSectionConfig{}, ReactionConfig{});
+    ObservableCalculator oc;
+
+    const GlobalObservables o0 = oc.compute(ps);
+    const int pi0_tot = o0.counts[PION_MINUS] + o0.counts[PION_ZERO] + o0.counts[PION_PLUS];
+    const int del0_tot = o0.counts[DELTA_MINUS] + o0.counts[DELTA_ZERO] + o0.counts[DELTA_PLUS] + o0.counts[DELTA_PLUSPLUS];
+    for (int s = 0; s < 50; ++s) stepper.step(ps, grid);
+    const GlobalObservables o1 = oc.compute(ps);
+    const StepStats st = stepper.read_stats();
+    const int pi1_tot = o1.counts[PION_MINUS] + o1.counts[PION_ZERO] + o1.counts[PION_PLUS];
+    const int del1_tot = o1.counts[DELTA_MINUS] + o1.counts[DELTA_ZERO] + o1.counts[DELTA_PLUS] + o1.counts[DELTA_PLUSPLUS];
+
+    TEST_ASSERT(st.formations_2to1 > 1000 && st.decays_1to2 > 1000 && st.collisions_inelastic_2to2 > 300,
+                "Expected active pi+N <-> Delta and N+N <-> N+Delta reactions");
+    TEST_ASSERT(std::fabs(static_cast<double>(pi1_tot - pi0_tot)) / pi0_tot < 0.10, "Pion equilibrium yield drifted");
+    TEST_ASSERT(std::fabs(static_cast<double>(del1_tot - del0_tot)) / del0_tot < 0.14, "Delta equilibrium yield drifted");
+    TEST_ASSERT(o1.baryon_tot == o0.baryon_tot && o1.charge_tot == o0.charge_tot, "Signed Q or B violated with pions/Deltas");
+    TEST_ASSERT(std::fabs(o1.E_tot - o0.E_tot) / o0.E_tot < 1.0e-11, "Energy conservation violated in pi-Delta box");
+    std::printf("[PASS] test_pion_delta_detailed_balance (sig_pk=%.1f/%.1f mb [%.2f], pi:%d->%d, Delta:%d->%d)\n",
+                sig_dpp_mb, sig_d0_mb, sig_dpp_mb / sig_d0_mb, pi0_tot, pi1_tot, del0_tot, del1_tot);
+}
+
+void test_hic_pion_and_delta_production() {
+    double y_cm = 0.0;
+    const int A_nuc = 197, Z_nuc = 79, n_test = 15;
+    auto hic_p = init_heavy_ion_collision(A_nuc, Z_nuc, n_test, /*elab_amev=*/800.0, /*b=*/3.0, 2027ULL, y_cm);
+
+    GridConfig gcfg{};
+    gcfg.boundary = BoundaryMode::OpenExpanding;
+    gcfg.nx = 16; gcfg.ny = 16; gcfg.nz = 16;
+    gcfg.xmin = -20.0; gcfg.xmax = 20.0;
+    gcfg.ymin = -20.0; gcfg.ymax = 20.0;
+    gcfg.zmin = -20.0; gcfg.zmax = 20.0;
+
+    ParticleSystem ps; ps.upload(hic_p);
+    SpatialGrid sg(gcfg);
+    MeanFieldGrid mf(make_mean_field_config(EOSPreset::MDSoft), gcfg);
+    StepperConfig sc{};
+    sc.dt_fm = 0.25; sc.n_test = n_test; sc.collision_substeps = 2;
+    sc.in_medium_energy_conservation = true;
+    sc.exact_hamiltonian_projection = true;
+
+    TransportStepper stp(sc, CrossSectionConfig{}, ReactionConfig{});
+    ObservableCalculator oc;
+    mf.rebuild_potentials(ps, n_test);
+    const GlobalObservables o0 = oc.compute(ps);
+    const double H0 = o0.E_tot + mf.compute_potential_energy_test_gev(n_test);
+
+    int peak_delta = 0;
+    for (int s = 0; s < 110; ++s) {
+        stp.step(ps, sg, &mf);
+        if (s % 10 == 0) {
+            const GlobalObservables om = oc.compute(ps);
+            const int nd = om.counts[DELTA_MINUS] + om.counts[DELTA_ZERO] +
+                           om.counts[DELTA_PLUS] + om.counts[DELTA_PLUSPLUS];
+            if (nd > peak_delta) peak_delta = nd;
+        }
+    }
+    mf.rebuild_potentials(ps, n_test);
+    const GlobalObservables o1 = oc.compute(ps);
+    const double H1 = o1.E_tot + mf.compute_potential_energy_test_gev(n_test);
+
+    const auto det = decay_all_unstable_for_detection(ps.download(), sc.seed);
+    int n_pim = 0, n_pi0 = 0, n_pip = 0;
+    for (const auto& hp : det) {
+        if (hp.species == PION_MINUS) ++n_pim;
+        else if (hp.species == PION_ZERO) ++n_pi0;
+        else if (hp.species == PION_PLUS) ++n_pip;
+    }
+    TEST_ASSERT(peak_delta > 40 && (n_pim + n_pi0 + n_pip) > 150,
+                "Expected robust Delta excitation and pion production in Au+Au @ 800 AMeV");
+    TEST_ASSERT(n_pim > n_pip, "Expected neutron-rich Au+Au isospin excess pi- > pi+");
+    TEST_ASSERT(o1.baryon_tot == o0.baryon_tot && o1.charge_tot == o0.charge_tot,
+                "Baryon or signed electric charge violated in Au+Au pion production");
+    TEST_ASSERT(std::fabs(H1 - H0) / std::fabs(H0) < 1.0e-11,
+                "Exact MD Hamiltonian conservation violated with active Delta/pion production");
+    std::printf("[PASS] test_hic_pion_and_delta_production (peak Delta=%d, freeze-out pi-=%d, pi0=%d, pi+=%d, pi-/pi+=%.2f, |dH|/H=%.2e)\n",
+                peak_delta, n_pim, n_pi0, n_pip, static_cast<double>(n_pim) / (n_pip > 0 ? n_pip : 1),
+                std::fabs(H1 - H0) / std::fabs(H0));
+}
+
 }  // namespace
 
 int main() {
@@ -787,6 +922,8 @@ int main() {
     test_vlasov_meanfield_conservation_and_spinodal();
     test_hic_and_hydro_binary_output();
     test_in_medium_collision_energy_conservation();
+    test_pion_delta_cross_sections_and_detailed_balance();
+    test_hic_pion_and_delta_production();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

@@ -26,13 +26,16 @@ struct BinaryInelasticChannel {
     double form_scale_gev2;    // High-energy form-factor falloff scale Lambda_s^2 [GeV^2]
 };
 
-constexpr int NUM_INELASTIC_2TO2_CHANNELS = 46;
+constexpr int NUM_INELASTIC_2TO2_CHANNELS = 57;
 
 HD_INLINE constexpr BinaryInelasticChannel get_inelastic_2to2_channel(int idx) {
-    // Channels 0..5: Ground-state rearrangement, fusion/breakup & charge-exchange
-    // Channels 6..9: Deuteron catalysis via spin-singlet d* triplet (N + d <-> N + d*)
+    // Channels 0..5:   Ground-state rearrangement, fusion/breakup & charge-exchange
+    // Channels 6..9:   Deuteron catalysis via spin-singlet d* triplet (N + d <-> N + d*)
     // Channels 10..43: Proton/neutron inelastic excitation of 4He <-> 4He* (17 TUNL levels)
     // Channels 44..45: Isobaric charge-exchange excitation N + 4He <-> N' + 4H* / 4Li*
+    // Channels 46..51: Isobar excitation/absorption N + N <-> N + Delta(1232) (I=1 Clebsch-Gordan 3:1:1:1)
+    // Channels 52..54: Two-nucleon pion fusion / deuteron pion absorption N + N <-> d + pi (I=1)
+    // Channels 55..56: Non-resonant pion-nucleon charge exchange pi + N <-> pi0 + N'
     constexpr BinaryInelasticChannel table[NUM_INELASTIC_2TO2_CHANNELS] = {
         // 1. Ground-state A <= 4 transfer & charge-exchange chemistry
         {PROTON,   TRITON,   NEUTRON,  HELION,   18.0, 1.5},  // p + t <-> n + 3He
@@ -88,7 +91,25 @@ HD_INLINE constexpr BinaryInelasticChannel get_inelastic_2to2_channel(int idx) {
 
         // 5. Charge-exchange A = 4 resonance excitation
         {NEUTRON, ALPHA, PROTON,  H4_RES,   12.0, 2.0},
-        {PROTON,  ALPHA, NEUTRON, LI4_RES,  12.0, 2.0}
+        {PROTON,  ALPHA, NEUTRON, LI4_RES,  12.0, 2.0},
+
+        // 6. Nucleon-nucleon Delta(1232) excitation & absorption: N + N <-> N + Delta (I_tot = 1)
+        //    Clebsch-Gordan ratios 3/4 : 1/4 : 1/4 : 1/4 (VerWest-Arndt / Huber-Aichelin)
+        {PROTON,  PROTON,  NEUTRON, DELTA_PLUSPLUS, 6.3, 1.4},  // p + p <-> n + Delta++
+        {PROTON,  PROTON,  PROTON,  DELTA_PLUS,     2.1, 1.4},  // p + p <-> p + Delta+
+        {PROTON,  NEUTRON, PROTON,  DELTA_ZERO,     2.1, 1.4},  // p + n <-> p + Delta0
+        {PROTON,  NEUTRON, NEUTRON, DELTA_PLUS,     2.1, 1.4},  // p + n <-> n + Delta+
+        {NEUTRON, NEUTRON, PROTON,  DELTA_MINUS,    6.3, 1.4},  // n + n <-> p + Delta-
+        {NEUTRON, NEUTRON, NEUTRON, DELTA_ZERO,     2.1, 1.4},  // n + n <-> n + Delta0
+
+        // 7. Two-nucleon pion fusion / deuteron pion absorption: N + N <-> d + pi (I_tot = 1)
+        {PROTON,  PROTON,  DEUTERON, PION_PLUS,     1.8, 0.6},  // p + p <-> d + pi+
+        {PROTON,  NEUTRON, DEUTERON, PION_ZERO,     0.9, 0.6},  // p + n <-> d + pi0
+        {NEUTRON, NEUTRON, DEUTERON, PION_MINUS,    1.8, 0.6},  // n + n <-> d + pi-
+
+        // 8. Non-resonant pion-nucleon charge-exchange background
+        {PION_MINUS, PROTON,  PION_ZERO, NEUTRON,   1.2, 0.8},  // pi- + p <-> pi0 + n
+        {PION_PLUS,  NEUTRON, PION_ZERO, PROTON,    1.2, 0.8}   // pi+ + n <-> pi0 + p
     };
     return table[idx];
 }

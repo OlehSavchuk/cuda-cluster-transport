@@ -280,8 +280,11 @@ HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
     if (!cic_weights(p.x[i], p.y[i], p.z[i], mf.gcfg, i0, j0, k0, fx, fy, fz)) return;
 
     const SpeciesInfo sp = get_species_info(p.species[i]);
-    const double zp = static_cast<double>(sp.charge) * norm_inv_n_dV;
-    const double zn = static_cast<double>(sp.baryon_num - sp.charge) * norm_inv_n_dV;
+    if (sp.baryon_num == 0) return;
+    double wp = 0.0, wn = 0.0;
+    get_effective_pn_weights(p.species[i], wp, wn);
+    const double zp = wp * norm_inv_n_dV;
+    const double zn = wn * norm_inv_n_dV;
     const double pxw = p.px[i] * norm_inv_n_dV;
     const double pyw = p.py[i] * norm_inv_n_dV;
     const double pzw = p.pz[i] * norm_inv_n_dV;
@@ -353,6 +356,7 @@ HD_INLINE void deposit_particle_md_psi_cic(const ParticleSoAView& p, int i,
     sample_cic_flow_and_u(mf, p.x[i], p.y[i], p.z[i], u_loc, pfx, pfy, pfz);
 
     const SpeciesInfo sp = get_species_info(p.species[i]);
+    if (sp.baryon_num == 0) return;
     const double inv_A = 1.0 / static_cast<double>(sp.baryon_num);
     const double qx = p.px[i] * inv_A - pfx;
     const double qy = p.py[i] * inv_A - pfy;
@@ -430,8 +434,9 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
     if (!p.active[i]) return;
     const double x = p.x[i], y = p.y[i], z = p.z[i];
     const SpeciesInfo sp = get_species_info(p.species[i]);
-    const double Z = static_cast<double>(sp.charge);
-    const double N = static_cast<double>(sp.baryon_num - sp.charge);
+    if (sp.baryon_num == 0) return;
+    double Z = 0.0, N = 0.0;
+    get_effective_pn_weights(p.species[i], Z, N);
     const double A = static_cast<double>(sp.baryon_num);
 
     double gpx = 0.0, gpy = 0.0, gpz = 0.0;
@@ -500,7 +505,9 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
 HD_INLINE void remove_lattice_cm_impulse(ParticleSoAView& p, int i,
                                          double corr_x, double corr_y, double corr_z) {
     if (!p.active[i]) return;
-    const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
+    const int bnum = get_species_info(p.species[i]).baryon_num;
+    if (bnum == 0) return;
+    const double A = static_cast<double>(bnum);
     p.px[i] -= A * corr_x;
     p.py[i] -= A * corr_y;
     p.pz[i] -= A * corr_z;
@@ -516,10 +523,11 @@ HD_INLINE void drift_particle_vlasov(ParticleSoAView& p, int i, double dt, const
     double vy = p.py[i] * inv_E;
     double vz = p.pz[i] * inv_E;
 
-    if (mf.cfg.enabled && ::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
+    const int bnum = get_species_info(p.species[i]).baryon_num;
+    if (bnum > 0 && mf.cfg.enabled && ::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
         double u_loc, pfx, pfy, pfz;
         sample_cic_flow_and_u(mf, p.x[i], p.y[i], p.z[i], u_loc, pfx, pfy, pfz);
-        const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
+        const double A = static_cast<double>(bnum);
         const double qx = p.px[i] / A - pfx;
         const double qy = p.py[i] / A - pfy;
         const double qz = p.pz[i] / A - pfz;
@@ -560,8 +568,9 @@ HD_INLINE double eval_particle_potential_gev(const MeanFieldView& mf,
                                              double px, double py, double pz) {
     if (!mf.cfg.enabled) return 0.0;
     const SpeciesInfo sp = get_species_info(species_id);
-    const double Z = static_cast<double>(sp.charge);
-    const double N = static_cast<double>(sp.baryon_num - sp.charge);
+    if (sp.baryon_num == 0) return 0.0;
+    double Z = 0.0, N = 0.0;
+    get_effective_pn_weights(species_id, Z, N);
     const double A = static_cast<double>(sp.baryon_num);
 
     double u_tot = Z * sample_cic_scalar(mf.u_loc_p, x, y, z, mf.gcfg) +
@@ -634,19 +643,21 @@ HD_INLINE bool solve_in_medium_2body_momenta(const MeanFieldView& mf,
 
 HD_INLINE void accum_kin_cm_particle(const ParticleSoAView& p, int i, double* acc5) {
     if (!p.active[i]) return;
-    const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
+    const int bnum = get_species_info(p.species[i]).baryon_num;
+    const double W = (bnum > 0) ? static_cast<double>(bnum) : 1.0;
     portable_atomic_add_double(&acc5[0], p.E[i]);
     portable_atomic_add_double(&acc5[1], p.px[i]);
     portable_atomic_add_double(&acc5[2], p.py[i]);
     portable_atomic_add_double(&acc5[3], p.pz[i]);
-    portable_atomic_add_double(&acc5[4], A);
+    portable_atomic_add_double(&acc5[4], W);
 }
 
 HD_INLINE void accum_peculiar_virial_particle(const ParticleSoAView& p, int i,
                                               double cx, double cy, double cz, double* virial_acc) {
     if (!p.active[i]) return;
-    const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
-    const double dpx = p.px[i] - A * cx, dpy = p.py[i] - A * cy, dpz = p.pz[i] - A * cz;
+    const int bnum = get_species_info(p.species[i]).baryon_num;
+    const double W = (bnum > 0) ? static_cast<double>(bnum) : 1.0;
+    const double dpx = p.px[i] - W * cx, dpy = p.py[i] - W * cy, dpz = p.pz[i] - W * cz;
     const double v = (p.px[i] * dpx + p.py[i] * dpy + p.pz[i] * dpz) / p.E[i];
     portable_atomic_add_double(virial_acc, v);
 }
@@ -654,8 +665,9 @@ HD_INLINE void accum_peculiar_virial_particle(const ParticleSoAView& p, int i,
 HD_INLINE void scale_peculiar_momentum_particle(ParticleSoAView& p, int i,
                                                 double cx, double cy, double cz, double lam) {
     if (!p.active[i]) return;
-    const double A = static_cast<double>(get_species_info(p.species[i]).baryon_num);
-    const double mx = A * cx, my = A * cy, mz = A * cz;
+    const int bnum = get_species_info(p.species[i]).baryon_num;
+    const double W = (bnum > 0) ? static_cast<double>(bnum) : 1.0;
+    const double mx = W * cx, my = W * cy, mz = W * cz;
     p.px[i] = mx + lam * (p.px[i] - mx);
     p.py[i] = my + lam * (p.py[i] - my);
     p.pz[i] = mz + lam * (p.pz[i] - mz);

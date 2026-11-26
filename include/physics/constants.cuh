@@ -25,5 +25,10 @@ constexpr double MASS_TRITON = 2.80892113298;
 constexpr double MASS_HELION = 2.80839160743;
 constexpr double MASS_ALPHA = 3.7273794066;
 
+// Pion and Delta(1232) resonance pole masses (PDG, in GeV)
+constexpr double MASS_PION_CHARGED = 0.13957039;
+constexpr double MASS_PION_NEUTRAL = 0.13497680;
+constexpr double MASS_DELTA_1232 = 1.23200000;
+
 }  // namespace phys
 }  // namespace transport

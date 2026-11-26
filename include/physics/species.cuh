@@ -51,8 +51,31 @@ enum SpeciesId : int {
     H4_RES = 26,        // 4H (2-, I=1, Iz=-1), ~3.19 MeV above t + n
     LI4_RES = 27,       // 4Li (2-, I=1, Iz=+1), ~4.07 MeV above 3He + p
 
-    NUM_SPECIES = 28
+    // Mesons: Pion isospin triplet (B = 0, J^P = 0-, I = 1)
+    PION_MINUS = 28,    // pi- (0-, I=1, Iz=-1, Z=-1)
+    PION_ZERO = 29,     // pi0 (0-, I=1, Iz=0,  Z=0)
+    PION_PLUS = 30,     // pi+ (0-, I=1, Iz=+1, Z=+1)
+
+    // Baryon resonances: Delta(1232) P33 isospin quartet (B = 1, J^P = 3/2+, I = 3/2)
+    DELTA_MINUS = 31,    // Delta-  (3/2+, I=3/2, Iz=-3/2, Z=-1)
+    DELTA_ZERO = 32,     // Delta0  (3/2+, I=3/2, Iz=-1/2, Z=0)
+    DELTA_PLUS = 33,     // Delta+  (3/2+, I=3/2, Iz=+1/2, Z=+1)
+    DELTA_PLUSPLUS = 34, // Delta++ (3/2+, I=3/2, Iz=+3/2, Z=+2)
+
+    NUM_SPECIES = 35
 };
+
+HD_INLINE constexpr bool is_pion(int id) {
+    return id >= PION_MINUS && id <= PION_PLUS;
+}
+
+HD_INLINE constexpr bool is_delta(int id) {
+    return id >= DELTA_MINUS && id <= DELTA_PLUSPLUS;
+}
+
+HD_INLINE constexpr bool is_a4_excited(int id) {
+    return id >= HE4_2021 && id <= LI4_RES;
+}
 
 // Pure numeric POD (pointer-free so nvcc places it in GPU constant/register memory cleanly)
 struct SpeciesInfo {
@@ -112,9 +135,41 @@ HD_INLINE constexpr SpeciesInfo get_species_info(int id) {
 
         // A = 4, I = 1 resonant nuclei 4H and 4Li
         {H4_RES,    4, 1, 4, -1, 2, 5, MASS_TRITON + MASS_NEUTRON + 0.00319,  3.19,  0.00542,   2.42, true},
-        {LI4_RES,   4, 3, 4, -1, 2, 5, MASS_HELION + MASS_PROTON + 0.00407,   4.07,  0.00603,   2.45, true}
+        {LI4_RES,   4, 3, 4, -1, 2, 5, MASS_HELION + MASS_PROTON + 0.00407,   4.07,  0.00603,   2.45, true},
+
+        // Pion isospin triplet (B = 0, J^P = 0-, I = 1, g = 1)
+        {PION_MINUS,     0, -1, 0, -1, 2, 1, MASS_PION_CHARGED,   0.00,   0.0,     0.66, false},
+        {PION_ZERO,      0,  0, 0, -1, 2, 1, MASS_PION_NEUTRAL,   0.00,   0.0,     0.66, false},
+        {PION_PLUS,      0, +1, 0, -1, 2, 1, MASS_PION_CHARGED,   0.00,   0.0,     0.66, false},
+
+        // Delta(1232) P33 isobar quartet (B = 1, J^P = 3/2+, I = 3/2, g = 4, Gamma_0 = 118 MeV)
+        {DELTA_MINUS,    1, -1, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
+        {DELTA_ZERO,     1,  0, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
+        {DELTA_PLUS,     1, +1, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
+        {DELTA_PLUSPLUS, 1, +2, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true}
     };
     return table[id];
+}
+
+// Effective non-negative proton/neutron constituent weights (wp >= 0, wn >= 0, wp + wn == A)
+// for Skyrme symmetry potentials and Glauber isospin-weighted cross sections.
+// Uses Clebsch-Gordan isospin projection for the I = 3/2 Delta(1232) quartet.
+HD_INLINE constexpr void get_effective_pn_weights(int id, double& wp, double& wn) {
+    if (is_pion(id)) {
+        wp = 0.0; wn = 0.0;
+    } else if (id == DELTA_PLUSPLUS) {
+        wp = 1.0; wn = 0.0;
+    } else if (id == DELTA_PLUS) {
+        wp = 2.0 / 3.0; wn = 1.0 / 3.0;
+    } else if (id == DELTA_ZERO) {
+        wp = 1.0 / 3.0; wn = 2.0 / 3.0;
+    } else if (id == DELTA_MINUS) {
+        wp = 0.0; wn = 1.0;
+    } else {
+        const SpeciesInfo sp = get_species_info(id);
+        wp = static_cast<double>(sp.charge);
+        wn = static_cast<double>(sp.baryon_num - sp.charge);
+    }
 }
 
 inline const char* get_species_name(int id) {
@@ -127,7 +182,9 @@ inline const char* get_species_name(int id) {
         "4He*(24.25)", "4He*(25.28)", "4He*(25.95)", "4He*(26.40)", "4He*(27.42)",
         "4He*(27.97)", "4He*(28.31)", "4He*(28.37)", "4He*(28.39)", "4He*(28.64)",
         "4He*(28.67)", "4He*(29.89)",
-        "4H*(2-)", "4Li*(2-)"
+        "4H*(2-)", "4Li*(2-)",
+        "pi-", "pi0", "pi+",
+        "Delta-", "Delta0", "Delta+", "Delta++"
     };
     return (id >= 0 && id < NUM_SPECIES) ? names[id] : "unknown";
 }
