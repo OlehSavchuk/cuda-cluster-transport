@@ -285,6 +285,7 @@ void print_usage(const char* prog) {
         "  --cluster-mode <microscopic|none|freezeout>\n"
         "                                     Cluster treatment: dynamical, pure N+Delta+pi, or n<nfr thermal\n"
         "  --backflow <remelt|outward|ghost>  Back-emitted freeze-out particle handling (default: remelt)\n"
+        "  --max-cluster-A <int>              Max nuclear mass A in freeze-out EoS/sampling (default: 6)\n"
         "  --nfr <float>                      Freeze-out Eckart baryon density n_fr [fm^-3] (default: 0.04)\n"
         "  --freezeout-every <int>            Steps between n<nfr cell checks (default: 2)\n"
         "  --freezeout-tmin <float>           Min time before n<nfr check [fm/c] (<0: auto overlap time)\n"
@@ -352,6 +353,7 @@ int main(int argc, char** argv) {
     int dump_tmunu_every = 5;
     std::string cluster_mode_str = "freezeout";
     std::string backflow_str = "remelt";
+    int max_cluster_A = 6;
     double nfr_fm3 = 0.040;
     int freezeout_every = 2;
     double freezeout_tmin = -1.0;
@@ -401,6 +403,8 @@ int main(int argc, char** argv) {
             cluster_mode_str = next_str();
         } else if (arg == "--backflow") {
             backflow_str = next_str();
+        } else if (arg == "--max-cluster-A") {
+            max_cluster_A = std::stoi(next_str());
         } else if (arg == "--nfr") {
             nfr_fm3 = std::stod(next_str());
         } else if (arg == "--freezeout-every") {
@@ -607,6 +611,7 @@ int main(int argc, char** argv) {
     else if (backflow_str == "ghost") fo_cfg.backflow = BackflowMode::GhostFreeStream;
     else fo_cfg.backflow = BackflowMode::RemeltInDense;
     fo_cfg.n_fr_fm3 = nfr_fm3;
+    fo_cfg.max_cluster_A = max_cluster_A;
     fo_cfg.cells_csv_path = freezeout_cells_csv;
     if (freezeout_tmin >= 0.0) {
         fo_cfg.min_time_fm = freezeout_tmin;

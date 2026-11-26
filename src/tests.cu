@@ -41,8 +41,8 @@ void test_species_table() {
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
         TEST_ASSERT(sp.id == id, "Species ID mismatch");
-        TEST_ASSERT(sp.baryon_num >= 0 && sp.baryon_num <= 4, "Baryon number out of range");
-        TEST_ASSERT(sp.charge >= -1 && sp.charge <= 3, "Charge out of range");
+        TEST_ASSERT(sp.baryon_num >= 0 && sp.baryon_num <= 6, "Baryon number out of range");
+        TEST_ASSERT(sp.charge >= -1 && sp.charge <= 4, "Charge out of range");
         TEST_ASSERT(sp.degeneracy == sp.two_J + 1, "Spin degeneracy mismatch g != 2J + 1");
         if (sp.baryon_num == 0) {
             ++n_mesons;
@@ -60,9 +60,9 @@ void test_species_table() {
             TEST_ASSERT(sp.width_gev > 0.0, "Excited state must have positive width");
         }
     }
-    TEST_ASSERT(n_mesons == 3 && n_excited == 26,
-                "Expected 3 pions + 26 excited states (4 Delta + 22 nuclear)");
-    std::printf("[PASS] test_species_table (35 species: 9 ground hadrons/nuclei + 26 resonances)\n");
+    TEST_ASSERT(n_mesons == 3 && n_excited == 47,
+                "Expected 3 pions + 47 excited states (4 Delta + 43 A=2..6 nuclear resonances)");
+    std::printf("[PASS] test_species_table (58 species: 11 ground hadrons/nuclei [up to 6He,6Li] + 47 resonances)\n");
 }
 
 void test_relativistic_kinematics() {
@@ -169,12 +169,19 @@ void test_breit_wigner_spectral_properties() {
         TEST_ASSERT(std::fabs(gam_pole - sp.width_gev) / sp.width_gev < 1.0e-12,
                     "Total width at pole mass m0 must equal sp.width_gev");
 
-        // Verify unit normalization int_{m_min}^{m_max} A_R(m) dm = 1 via independent midpoint check
-        constexpr int N_CHK = 4000;
-        const double dm = (m_max - m_min) / N_CHK;
+        // Verify unit normalization int_{m_min}^{m_max} A_R(m) dm = 1 via core-refined midpoint check
+        const double w_c = 8.0 * sp.width_gev;
+        const double c_lo = ((m0 - w_c) > m_min) ? (m0 - w_c) : m_min;
+        const double c_hi = ((m0 + w_c) < m_max) ? (m0 + w_c) : m_max;
+        const double segs[4] = {m_min, c_lo, c_hi, m_max};
         double area = 0.0;
-        for (int k = 0; k < N_CHK; ++k) {
-            area += spectral_function(id, m_min + (k + 0.5) * dm, norms) * dm;
+        for (int sg = 0; sg < 3; ++sg) {
+            if (segs[sg + 1] <= segs[sg]) continue;
+            constexpr int N_CHK = 2000;
+            const double dm = (segs[sg + 1] - segs[sg]) / N_CHK;
+            for (int k = 0; k < N_CHK; ++k) {
+                area += spectral_function(id, segs[sg] + (k + 0.5) * dm, norms) * dm;
+            }
         }
         TEST_ASSERT(std::fabs(area - 1.0) < 5.0e-3,
                     "Normalized Breit-Wigner spectral function failed unit integral check");
@@ -1077,6 +1084,51 @@ void test_pure_hadron_and_grid_freezeout_clusters() {
                 d_fo, a_fo, dE_fo, dP_fo);
 }
 
+void test_a456_isotopes_and_cascade_decays() {
+    // 1. Verify multi-step cascade decays of 6H, 6He*(2+), 6Li*(3+), 6Li*(2+_1), 6Be, 6Be*(2+), 5H, 5He, 5Li
+    std::vector<HostParticle> res_in;
+    const int test_ids[] = {H6_GS, HE6_180, LI6_219, LI6_537, BE6_GS, BE6_167, H5_GS, HE5_GS, LI5_GS};
+    long long b_in = 0, q_in = 0;
+    double E_in = 0.0, Px_in = 0.0;
+    for (int id : test_ids) {
+        const SpeciesInfo sp = get_species_info(id);
+        HostParticle hp{};
+        hp.species = id;
+        hp.mass = sp.pole_mass_gev + 0.001;
+        hp.px = 0.30; hp.py = -0.20; hp.pz = 0.40;
+        hp.E = std::sqrt(hp.mass * hp.mass + hp.px * hp.px + hp.py * hp.py + hp.pz * hp.pz);
+        res_in.push_back(hp);
+        b_in += sp.baryon_num; q_in += sp.charge; E_in += hp.E; Px_in += hp.px;
+    }
+    const auto dec = decay_all_unstable_for_detection(res_in, 2028ULL);
+    long long b_out = 0, q_out = 0;
+    double E_out = 0.0, Px_out = 0.0;
+    int n_alpha = 0;
+    for (const auto& hp : dec) {
+        const SpeciesInfo sp = get_species_info(hp.species);
+        TEST_ASSERT(!sp.is_excited, "Multi-step cascade failed to reach stable ground-state daughters");
+        b_out += sp.baryon_num; q_out += sp.charge; E_out += hp.E; Px_out += hp.px;
+        if (hp.species == ALPHA) ++n_alpha;
+    }
+    TEST_ASSERT(b_out == b_in && q_out == q_in, "B or Q conservation violated in A=5,6 cascade decays");
+    TEST_ASSERT(std::fabs(E_out - E_in) / E_in < 1.0e-13 && std::fabs(Px_out - Px_in) < 1.0e-13,
+                "4-momentum conservation violated in A=5,6 cascade decays");
+    TEST_ASSERT(n_alpha >= 7, "Expected >= 7 4He daughters from 5He, 5Li, 6He*, 6Li*, 6Be cascades");
+
+    // 2. Compare max_cluster_A = 4 vs max_cluster_A = 6 in cool subsaturation freeze-out cell:
+    //    verify A=5,6 isotopes boost 4He via feed-down and populate bound 6He & 6Li!
+    double n4[NUM_SPECIES] = {}, n6[NUM_SPECIES] = {}, T4 = 0.0, T6 = 0.0, muB = 0.0, muQ = 0.0;
+    fo_detail::invert_local_cluster_eos(0.020, 0.40, 0.008, true, 4, T4, muB, muQ, n4);
+    fo_detail::invert_local_cluster_eos(0.020, 0.40, 0.008, true, 6, T6, muB, muQ, n6);
+    const double alpha_feed6 = n6[ALPHA] + n6[HE5_GS] + n6[HE5_127] + n6[LI5_GS] + n6[LI5_149] +
+                               n6[HE6_180] + n6[LI6_219] + n6[LI6_431] + n6[LI6_537] + n6[LI6_565] +
+                               n6[BE6_GS] + n6[BE6_167];
+    TEST_ASSERT(n6[HE6_GS] > 0.0 && n6[LI6_GS] > 0.0, "Expected positive bound 6He and 6Li densities");
+    TEST_ASSERT(alpha_feed6 > 1.25 * n4[ALPHA], "Expected A=5,6 alpha-decaying isotopes to boost total 4He yield");
+    std::printf("[PASS] test_a456_isotopes_and_cascade_decays (cascades->%zu ground daughters, 4He_tot(A<=6)/4He(A<=4)=%.2f)\n",
+                dec.size(), alpha_feed6 / n4[ALPHA]);
+}
+
 }  // namespace
 
 int main() {
@@ -1100,6 +1152,7 @@ int main() {
     test_hic_pion_and_delta_production();
     test_hcgf_tmunu_and_landau_frame();
     test_pure_hadron_and_grid_freezeout_clusters();
+    test_a456_isotopes_and_cascade_decays();
 
     std::printf("=== ALL TESTS PASSED ===\n");
     return 0;

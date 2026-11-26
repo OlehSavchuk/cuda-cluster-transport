@@ -15,56 +15,65 @@
 
 namespace transport {
 
-// Force all remaining unstable resonances (d*, 4He*, 4H*, 4Li*) at freeze-out to decay
-// into asymptotic ground-state daughters (p, n, d, t, 3He) prior to FOPI flow analysis.
+// Force all remaining unstable resonances (Delta, d*, A=4*, A=5*, A=6*) at freeze-out to decay
+// iteratively via multi-step 2-body cascades into asymptotic stable ground-state daughters.
 inline std::vector<HostParticle> decay_all_unstable_for_detection(
     const std::vector<HostParticle>& in_particles, std::uint64_t seed) {
-    std::vector<HostParticle> out;
-    out.reserve(in_particles.size() + 2048);
-
-    for (std::size_t i = 0; i < in_particles.size(); ++i) {
-        const HostParticle& hp = in_particles[i];
-        const SpeciesInfo sp = get_species_info(hp.species);
-        if (!sp.is_excited) {
-            out.push_back(hp);
-            continue;
-        }
-
-        PhiloxRng rng(seed ^ 0xFACE1234ULL, 999ULL, static_cast<std::uint64_t>(i));
-        const ResonanceDecaySpec dspec = get_decay_spec(hp.species);
-        double br_w[3] = {0.0, 0.0, 0.0}, br_sum = 0.0;
-        for (int b = 0; b < dspec.n_branches; ++b) {
-            br_w[b] = branch_partial_width_gev(hp.species, b, hp.mass);
-            br_sum += br_w[b];
-        }
-        int chosen = 0;
-        if (br_sum > 0.0) {
-            const double tgt = rng.uniform() * br_sum;
-            double acc = 0.0;
-            for (int b = 0; b < dspec.n_branches; ++b) {
-                acc += br_w[b];
-                if (tgt <= acc) { chosen = b; break; }
+    std::vector<HostParticle> cur = in_particles;
+    for (int pass = 0; pass < 6; ++pass) {
+        bool any_excited = false;
+        std::vector<HostParticle> next;
+        next.reserve(cur.size() + 2048);
+        for (std::size_t i = 0; i < cur.size(); ++i) {
+            const HostParticle& hp = cur[i];
+            const SpeciesInfo sp = get_species_info(hp.species);
+            if (!sp.is_excited) {
+                next.push_back(hp);
+                continue;
             }
+            any_excited = true;
+            PhiloxRng rng(seed ^ 0xFACE1234ULL, 999ULL + pass, static_cast<std::uint64_t>(i));
+            const ResonanceDecaySpec dspec = get_decay_spec(hp.species);
+            double br_w[3] = {0.0, 0.0, 0.0}, br_sum = 0.0;
+            for (int b = 0; b < dspec.n_branches; ++b) {
+                br_w[b] = branch_partial_width_gev(hp.species, b, hp.mass);
+                br_sum += br_w[b];
+            }
+            int chosen = 0;
+            if (br_sum > 0.0) {
+                const double tgt = rng.uniform() * br_sum;
+                double acc = 0.0;
+                for (int b = 0; b < dspec.n_branches; ++b) {
+                    acc += br_w[b];
+                    if (tgt <= acc) { chosen = b; break; }
+                }
+            } else {
+                for (int b = 0; b < dspec.n_branches; ++b) {
+                    if (dspec.branches[b].br_pole > dspec.branches[chosen].br_pole) chosen = b;
+                }
+            }
+            const int d1 = dspec.branches[chosen].d1;
+            const int d2 = dspec.branches[chosen].d2;
+            const double ma = get_species_info(d1).pole_mass_gev;
+            const double mb = get_species_info(d2).pole_mass_gev;
+
+            FourVector pa{}, pb{};
+            const double cth = 1.0 - 2.0 * rng.uniform();
+            const double phi = phys::TWO_PI * rng.uniform();
+            const double m_eff = (hp.mass > ma + mb + 1.0e-6) ? hp.mass : (ma + mb + 1.0e-4);
+            const double E_eff = std::sqrt(m_eff * m_eff + hp.px * hp.px + hp.py * hp.py + hp.pz * hp.pz);
+            decay_isotropic_1to2(FourVector{E_eff, hp.px, hp.py, hp.pz}, m_eff, ma, mb, cth, phi, pa, pb);
+
+            HostParticle ha = hp, hb = hp;
+            ha.species = d1; ha.mass = ma; ha.E = pa.t; ha.px = pa.x; ha.py = pa.y; ha.pz = pa.z;
+            hb.species = d2; hb.mass = mb; hb.E = pb.t; hb.px = pb.x; hb.py = pb.y; hb.pz = pb.z;
+            next.push_back(ha);
+            next.push_back(hb);
         }
-        const int d1 = dspec.branches[chosen].d1;
-        const int d2 = dspec.branches[chosen].d2;
-        const double ma = get_species_info(d1).pole_mass_gev;
-        const double mb = get_species_info(d2).pole_mass_gev;
-
-        FourVector pa{}, pb{};
-        const double cth = 1.0 - 2.0 * rng.uniform();
-        const double phi = phys::TWO_PI * rng.uniform();
-        const double m_eff = (hp.mass > ma + mb + 1.0e-6) ? hp.mass : (ma + mb + 1.0e-4);
-        const double E_eff = std::sqrt(m_eff * m_eff + hp.px * hp.px + hp.py * hp.py + hp.pz * hp.pz);
-        decay_isotropic_1to2(FourVector{E_eff, hp.px, hp.py, hp.pz}, m_eff, ma, mb, cth, phi, pa, pb);
-
-        HostParticle ha = hp, hb = hp;
-        ha.species = d1; ha.mass = ma; ha.E = pa.t; ha.px = pa.x; ha.py = pa.y; ha.pz = pa.z;
-        hb.species = d2; hb.mass = mb; hb.E = pb.t; hb.px = pb.x; hb.py = pb.y; hb.pz = pb.z;
-        out.push_back(ha);
-        out.push_back(hb);
+        cur.swap(next);
+        if (!any_excited) break;
     }
-    return out;
+    return cur;
 }
 
 inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_particles,
@@ -76,9 +85,9 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
     const double y0_norm = (y_cm_beam > 1.0e-6) ? y_cm_beam : 0.35723;
     const double u_proj = std::sinh(y0_norm);  // FOPI projectile 4-velocity beta_p * gamma_p in CM
 
-    // 10 categories: 0=p, 1=n, 2=d, 3=t, 4=3He, 5=A3(t+3He), 6=4He, 7=pi-, 8=pi0, 9=pi+
-    constexpr int N_CAT = 10;
-    const char* cat_names[N_CAT] = {"p", "n", "d", "t", "3He", "A3", "4He", "pi-", "pi0", "pi+"};
+    // 12 categories: 0=p, 1=n, 2=d, 3=t, 4=3He, 5=A3(t+3He), 6=4He, 7=pi-, 8=pi0, 9=pi+, 10=6He, 11=6Li
+    constexpr int N_CAT = 12;
+    const char* cat_names[N_CAT] = {"p", "n", "d", "t", "3He", "A3", "4He", "pi-", "pi0", "pi+", "6He", "6Li"};
 
     constexpr int N_YBINS = 18;
     constexpr double Y0_MIN = -1.44, Y0_MAX = 1.44;
@@ -159,6 +168,8 @@ inline void compute_and_write_fopi_flow(const std::vector<HostParticle>& raw_par
         else if (hp.species == PION_MINUS)   add_to_cat(7, yb, y0, pt, ut0, hp.px, hp.py);
         else if (hp.species == PION_ZERO)    add_to_cat(8, yb, y0, pt, ut0, hp.px, hp.py);
         else if (hp.species == PION_PLUS)    add_to_cat(9, yb, y0, pt, ut0, hp.px, hp.py);
+        else if (hp.species == HE6_GS)       add_to_cat(10, yb, y0, pt, ut0, hp.px, hp.py);
+        else if (hp.species == LI6_GS)       add_to_cat(11, yb, y0, pt, ut0, hp.px, hp.py);
     }
 
     std::printf("\n=== FOPI Freeze-Out Yields & Midrapidity Squeeze-Out v2 (|y0|<0.4, u_t0>0.8) ===\n");

@@ -101,14 +101,78 @@ HD_INLINE constexpr ResonanceDecaySpec get_decay_spec(int res_id) {
             spec.branches[2] = {DEUTERON, DEUTERON, 2, 0.10};
             break;
 
-        // A = 4, I = 1 isobaric resonances 4H*(2-) -> n + t, 4Li*(2-) -> p + 3He (p-wave)
+        // A = 4, I = 1 isobaric resonances 4H*(2-, 1-, 0-) -> n + t, 4Li*(2-, 1-, 0-) -> p + 3He (p-wave)
         case H4_RES:
+        case H4_1M_350:
+        case H4_0M_527:
+        case H4_1M_602:
             spec.n_branches = 1;
             spec.branches[0] = {NEUTRON, TRITON, 1, 1.0};
             break;
         case LI4_RES:
+        case LI4_1M_439:
+        case LI4_0M_615:
+        case LI4_1M_692:
             spec.n_branches = 1;
             spec.branches[0] = {PROTON, HELION, 1, 1.0};
+            break;
+
+        // A = 5 TUNL resonances: 5H, 5He, 5Li
+        case H5_GS:
+            spec.n_branches = 1;
+            spec.branches[0] = {TRITON, D_STAR_NN, 0, 1.0};
+            break;
+        case HE5_GS:
+        case HE5_127:
+            spec.n_branches = 1;
+            spec.branches[0] = {ALPHA, NEUTRON, 1, 1.0};
+            break;
+        case HE5_1684:
+            spec.n_branches = 2;
+            spec.branches[0] = {ALPHA,    NEUTRON, 2, 0.50};
+            spec.branches[1] = {DEUTERON, TRITON,  0, 0.50};
+            break;
+        case LI5_GS:
+        case LI5_149:
+            spec.n_branches = 1;
+            spec.branches[0] = {ALPHA, PROTON, 1, 1.0};
+            break;
+        case LI5_1687:
+            spec.n_branches = 2;
+            spec.branches[0] = {ALPHA,    PROTON, 2, 0.50};
+            spec.branches[1] = {DEUTERON, HELION, 0, 0.50};
+            break;
+
+        // A = 6 TUNL resonances: 6H, 6He*(2+), 6Li*, 6Be
+        case H6_GS:
+            spec.n_branches = 1;
+            spec.branches[0] = {H5_GS, NEUTRON, 1, 1.0};
+            break;
+        case HE6_180:
+            spec.n_branches = 1;
+            spec.branches[0] = {HE5_GS, NEUTRON, 1, 1.0};
+            break;
+        case LI6_219:
+        case LI6_431:
+            spec.n_branches = 1;
+            spec.branches[0] = {ALPHA, DEUTERON, 2, 1.0};
+            break;
+        case LI6_537:
+            spec.n_branches = 1;
+            spec.branches[0] = {HE5_GS, PROTON, 1, 1.0};
+            break;
+        case LI6_565:
+            spec.n_branches = 1;
+            spec.branches[0] = {ALPHA, DEUTERON, 0, 1.0};
+            break;
+        case BE6_GS:
+            spec.n_branches = 1;
+            spec.branches[0] = {ALPHA, D_STAR_PP, 0, 1.0};
+            break;
+        case BE6_167:
+            spec.n_branches = 2;
+            spec.branches[0] = {LI5_GS, PROTON,    1, 0.50};
+            spec.branches[1] = {ALPHA,  D_STAR_PP, 2, 0.50};
             break;
 
         // Delta(1232) (J^P = 3/2+, I = 3/2) -> N + pi (p-wave, L = 1) with exact Clebsch-Gordan weights
@@ -261,13 +325,18 @@ inline SpectralNormTable compute_spectral_norm_table() {
         const double m_max = resonance_max_mass(id);
         // Split integration at pole mass m0 to resolve even sub-MeV widths to <1e-12 accuracy
         const double m0 = sp.pole_mass_gev;
-        const double bounds[3] = {m_min, (m0 > m_min && m0 < m_max) ? m0 : 0.5 * (m_min + m_max), m_max};
+        const double w_core = 6.0 * sp.width_gev;
+        const double b1 = ((m0 - w_core) > m_min) ? (m0 - w_core) : (0.5 * (m_min + m0));
+        const double b2 = (m0 > m_min && m0 < m_max) ? m0 : (0.5 * (m_min + m_max));
+        const double b3 = ((m0 + w_core) < m_max) ? (m0 + w_core) : (0.5 * (m0 + m_max));
+        const double bounds[5] = {m_min, b1, b2, b3, m_max};
 
         double sum = 0.0;
-        for (int seg = 0; seg < 2; ++seg) {
-            constexpr int N_SUB = 128;
+        for (int seg = 0; seg < 4; ++seg) {
+            constexpr int N_SUB = 96;
             const double a = bounds[seg];
             const double b = bounds[seg + 1];
+            if (b <= a) continue;
             const double h = (b - a) / static_cast<double>(N_SUB);
             for (int k = 0; k < N_SUB; ++k) {
                 const double mid = a + (k + 0.5) * h;

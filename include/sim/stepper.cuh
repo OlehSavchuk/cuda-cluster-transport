@@ -216,22 +216,48 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
                         }
                     }
                 } else if (Z_tot == 1) {
-                    const double w = formation_vmoller_sigma_fm2(
-                        id1, id2, p1_in, p2_in, kin.sqrt_s, H4_RES, rxn_cfg.norms);
-                    if (w > 0.0) {
-                        form_res[n_form] = H4_RES;
-                        form_w[n_form] = w;
-                        w_form_sum += w;
-                        ++n_form;
+                    const int h4_cands[4] = {H4_RES, H4_1M_350, H4_0M_527, H4_1M_602};
+                    for (int r : h4_cands) {
+                        const double w = formation_vmoller_sigma_fm2(
+                            id1, id2, p1_in, p2_in, kin.sqrt_s, r, rxn_cfg.norms);
+                        if (w > 0.0 && n_form < 18) {
+                            form_res[n_form] = r; form_w[n_form] = w; w_form_sum += w; ++n_form;
+                        }
                     }
                 } else if (Z_tot == 3) {
+                    const int li4_cands[4] = {LI4_RES, LI4_1M_439, LI4_0M_615, LI4_1M_692};
+                    for (int r : li4_cands) {
+                        const double w = formation_vmoller_sigma_fm2(
+                            id1, id2, p1_in, p2_in, kin.sqrt_s, r, rxn_cfg.norms);
+                        if (w > 0.0 && n_form < 18) {
+                            form_res[n_form] = r; form_w[n_form] = w; w_form_sum += w; ++n_form;
+                        }
+                    }
+                }
+            } else if (rxn_cfg.enable_nuclear_clusters && B_tot == 5) {
+                if (Z_tot == 2) {
+                    for (int r : {HE5_GS, HE5_127, HE5_1684}) {
+                        const double w = formation_vmoller_sigma_fm2(
+                            id1, id2, p1_in, p2_in, kin.sqrt_s, r, rxn_cfg.norms);
+                        if (w > 0.0 && n_form < 18) {
+                            form_res[n_form] = r; form_w[n_form] = w; w_form_sum += w; ++n_form;
+                        }
+                    }
+                } else if (Z_tot == 3) {
+                    for (int r : {LI5_GS, LI5_149, LI5_1687}) {
+                        const double w = formation_vmoller_sigma_fm2(
+                            id1, id2, p1_in, p2_in, kin.sqrt_s, r, rxn_cfg.norms);
+                        if (w > 0.0 && n_form < 18) {
+                            form_res[n_form] = r; form_w[n_form] = w; w_form_sum += w; ++n_form;
+                        }
+                    }
+                }
+            } else if (rxn_cfg.enable_nuclear_clusters && B_tot == 6 && Z_tot == 3) {
+                for (int r : {LI6_219, LI6_431, LI6_565}) {
                     const double w = formation_vmoller_sigma_fm2(
-                        id1, id2, p1_in, p2_in, kin.sqrt_s, LI4_RES, rxn_cfg.norms);
-                    if (w > 0.0) {
-                        form_res[n_form] = LI4_RES;
-                        form_w[n_form] = w;
-                        w_form_sum += w;
-                        ++n_form;
+                        id1, id2, p1_in, p2_in, kin.sqrt_s, r, rxn_cfg.norms);
+                    if (w > 0.0 && n_form < 18) {
+                        form_res[n_form] = r; form_w[n_form] = w; w_form_sum += w; ++n_form;
                     }
                 }
             }

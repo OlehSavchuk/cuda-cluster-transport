@@ -62,7 +62,36 @@ enum SpeciesId : int {
     DELTA_PLUS = 33,     // Delta+  (3/2+, I=3/2, Iz=+1/2, Z=+1)
     DELTA_PLUSPLUS = 34, // Delta++ (3/2+, I=3/2, Iz=+3/2, Z=+2)
 
-    NUM_SPECIES = 35
+    // Remaining A = 4, I = 1 TUNL excited multiplets of 4H and 4Li (Tilley et al., NPA 541, 1992)
+    H4_1M_350 = 35,      // 4H*(1-_1), Ex = 0.31 MeV (3.50 MeV above t+n), Gamma = 6.73 MeV
+    H4_0M_527 = 36,      // 4H*(0-),   Ex = 2.08 MeV (5.27 MeV above t+n), Gamma = 8.92 MeV
+    H4_1M_602 = 37,      // 4H*(1-_2), Ex = 2.83 MeV (6.02 MeV above t+n), Gamma = 12.99 MeV
+    LI4_1M_439 = 38,     // 4Li*(1-_1), Ex = 0.32 MeV (4.39 MeV above 3He+p), Gamma = 7.35 MeV
+    LI4_0M_615 = 39,     // 4Li*(0-),   Ex = 2.08 MeV (6.15 MeV above 3He+p), Gamma = 9.35 MeV
+    LI4_1M_692 = 40,     // 4Li*(1-_2), Ex = 2.85 MeV (6.92 MeV above 3He+p), Gamma = 13.51 MeV
+
+    // A = 5 isotopes: 5H, 5He, 5Li (TUNL, Tilley et al., NPA 708, 2002; all particle-unstable!)
+    H5_GS = 41,          // 5H g.s. (1/2+, I=3/2), 1.80 MeV above t+2n -> t + nn*
+    HE5_GS = 42,         // 5He g.s. (3/2-, I=1/2), 0.798 MeV above 4He+n, Gamma = 0.648 MeV
+    HE5_127 = 43,        // 5He*(1.27, 1/2-, I=1/2), 2.068 MeV above 4He+n, Gamma = 5.57 MeV
+    HE5_1684 = 44,       // 5He*(16.84, 3/2+, I=1/2), d+t fusion resonance, Gamma = 0.075 MeV
+    LI5_GS = 45,         // 5Li g.s. (3/2-, I=1/2), 1.965 MeV above 4He+p, Gamma = 1.23 MeV
+    LI5_149 = 46,        // 5Li*(1.49, 1/2-, I=1/2), 3.455 MeV above 4He+p, Gamma = 6.60 MeV
+    LI5_1687 = 47,       // 5Li*(16.87, 3/2+, I=1/2), d+3He mirror resonance, Gamma = 0.267 MeV
+
+    // A = 6 isotopes: 6H, 6He (bound g.s. + 2+), 6Li (bound g.s. + 4 resonances), 6Be (g.s. + 2+)
+    H6_GS = 48,          // 6H g.s. (2-, I=2), 2.70 MeV above t+3n -> 5H + n
+    HE6_GS = 49,         // 6He g.s. (0+, I=1), BOUND (B = 29.271 MeV)
+    HE6_180 = 50,        // 6He*(1.80, 2+, I=1), Gamma = 0.113 MeV -> 5He + n
+    LI6_GS = 51,         // 6Li g.s. (1+, I=0), BOUND (B = 31.994 MeV)
+    LI6_219 = 52,        // 6Li*(2.186, 3+, I=0), Gamma = 0.024 MeV -> 4He + d
+    LI6_431 = 53,        // 6Li*(4.312, 2+, I=0), Gamma = 1.30 MeV  -> 4He + d
+    LI6_537 = 54,        // 6Li*(5.366, 2+, I=1), Gamma = 0.54 MeV  -> 5He + p
+    LI6_565 = 55,        // 6Li*(5.650, 1+, I=0), Gamma = 1.50 MeV  -> 4He + d
+    BE6_GS = 56,         // 6Be g.s. (0+, I=1), 1.371 MeV above 4He+2p -> 4He + pp*
+    BE6_167 = 57,        // 6Be*(1.67, 2+, I=1), Gamma = 1.16 MeV -> 5Li + p / 4He + pp*
+
+    NUM_SPECIES = 58
 };
 
 HD_INLINE constexpr bool is_pion(int id) {
@@ -74,7 +103,11 @@ HD_INLINE constexpr bool is_delta(int id) {
 }
 
 HD_INLINE constexpr bool is_a4_excited(int id) {
-    return id >= HE4_2021 && id <= LI4_RES;
+    return (id >= HE4_2021 && id <= LI4_RES) || (id >= H4_1M_350 && id <= LI4_1M_692);
+}
+
+HD_INLINE constexpr bool is_a56_excited(int id) {
+    return (id >= H5_GS && id <= H6_GS) || id == HE6_180 || (id >= LI6_219 && id <= BE6_167);
 }
 
 // Pure numeric POD (pointer-free so nvcc places it in GPU constant/register memory cleanly)
@@ -146,7 +179,36 @@ HD_INLINE constexpr SpeciesInfo get_species_info(int id) {
         {DELTA_MINUS,    1, -1, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
         {DELTA_ZERO,     1,  0, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
         {DELTA_PLUS,     1, +1, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
-        {DELTA_PLUSPLUS, 1, +2, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true}
+        {DELTA_PLUSPLUS, 1, +2, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
+
+        // Remaining A = 4, I = 1 TUNL excited multiplets of 4H and 4Li
+        {H4_1M_350,      4, 1, 2, -1, 2, 3, MASS_TRITON + MASS_NEUTRON + 0.00350,    3.50, 0.00673, 2.44, true},
+        {H4_0M_527,      4, 1, 0, -1, 2, 1, MASS_TRITON + MASS_NEUTRON + 0.00527,    5.27, 0.00892, 2.46, true},
+        {H4_1M_602,      4, 1, 2, -1, 2, 3, MASS_TRITON + MASS_NEUTRON + 0.00602,    6.02, 0.01299, 2.48, true},
+        {LI4_1M_439,     4, 3, 2, -1, 2, 3, MASS_HELION + MASS_PROTON  + 0.00439,    4.39, 0.00735, 2.46, true},
+        {LI4_0M_615,     4, 3, 0, -1, 2, 1, MASS_HELION + MASS_PROTON  + 0.00615,    6.15, 0.00935, 2.48, true},
+        {LI4_1M_692,     4, 3, 2, -1, 2, 3, MASS_HELION + MASS_PROTON  + 0.00692,    6.92, 0.01351, 2.50, true},
+
+        // A = 5 isotopes: 5H, 5He, 5Li (all particle-unstable resonances)
+        {H5_GS,          5, 1, 1, +1, 3, 2, MASS_TRITON + 2.0 * MASS_NEUTRON + 0.00180,  1.80, 0.00190, 2.60, true},
+        {HE5_GS,         5, 2, 3, -1, 1, 4, MASS_ALPHA  + MASS_NEUTRON + 0.000798,       0.80, 0.000648,2.45, true},
+        {HE5_127,        5, 2, 1, -1, 1, 2, MASS_ALPHA  + MASS_NEUTRON + 0.002068,       2.07, 0.00557, 2.52, true},
+        {HE5_1684,       5, 2, 3, +1, 1, 4, MASS_DEUTERON + MASS_TRITON + 0.000060,     17.65, 0.000075,2.65, true},
+        {LI5_GS,         5, 3, 3, -1, 1, 4, MASS_ALPHA  + MASS_PROTON  + 0.001965,       1.97, 0.00123, 2.48, true},
+        {LI5_149,        5, 3, 1, -1, 1, 2, MASS_ALPHA  + MASS_PROTON  + 0.003455,       3.46, 0.00660, 2.55, true},
+        {LI5_1687,       5, 3, 3, +1, 1, 4, MASS_DEUTERON + MASS_HELION + 0.000480,     18.83, 0.000267,2.68, true},
+
+        // A = 6 isotopes: 6H, 6He, 6Li, 6Be (bound 6He & 6Li g.s. + 8 resonant states)
+        {H6_GS,          6, 1, 4, -1, 4, 5, MASS_TRITON + 3.0 * MASS_NEUTRON + 0.00270,  2.70, 0.00160, 2.75, true},
+        {HE6_GS,         6, 2, 0, +1, 2, 1, MASS_HE6,                                    0.00, 0.0,     2.54, false},
+        {HE6_180,        6, 2, 4, +1, 2, 5, MASS_HE6 + 0.001850,                         1.80, 0.000113,2.65, true},
+        {LI6_GS,         6, 3, 2, +1, 0, 3, MASS_LI6,                                    0.00, 0.0,     2.55, false},
+        {LI6_219,        6, 3, 6, +1, 0, 7, MASS_LI6 + 0.002186,                         2.19, 0.000024,2.62, true},
+        {LI6_431,        6, 3, 4, +1, 0, 5, MASS_LI6 + 0.004312,                         4.31, 0.00130, 2.66, true},
+        {LI6_537,        6, 3, 4, +1, 2, 5, MASS_LI6 + 0.005366,                         5.37, 0.00054, 2.68, true},
+        {LI6_565,        6, 3, 2, +1, 0, 3, MASS_LI6 + 0.005650,                         5.65, 0.00150, 2.70, true},
+        {BE6_GS,         6, 4, 0, +1, 2, 1, MASS_ALPHA + 2.0 * MASS_PROTON + 0.001371,   1.37, 0.000092,2.65, true},
+        {BE6_167,        6, 4, 4, +1, 2, 5, MASS_ALPHA + 2.0 * MASS_PROTON + 0.003041,   3.04, 0.00116, 2.72, true}
     };
     return table[id];
 }
@@ -184,7 +246,14 @@ inline const char* get_species_name(int id) {
         "4He*(28.67)", "4He*(29.89)",
         "4H*(2-)", "4Li*(2-)",
         "pi-", "pi0", "pi+",
-        "Delta-", "Delta0", "Delta+", "Delta++"
+        "Delta-", "Delta0", "Delta+", "Delta++",
+        "4H*(1-_1)", "4H*(0-)", "4H*(1-_2)",
+        "4Li*(1-_1)", "4Li*(0-)", "4Li*(1-_2)",
+        "5H(1/2+)", "5He(3/2-)", "5He*(1/2-)", "5He*(16.84)",
+        "5Li(3/2-)", "5Li*(1/2-)", "5Li*(16.87)",
+        "6H(2-)", "6He", "6He*(2+)",
+        "6Li", "6Li*(3+)", "6Li*(2+_0)", "6Li*(2+_1)", "6Li*(1+)",
+        "6Be(0+)", "6Be*(2+)"
     };
     return (id >= 0 && id < NUM_SPECIES) ? names[id] : "unknown";
 }

@@ -26,7 +26,7 @@ struct BinaryInelasticChannel {
     double form_scale_gev2;    // High-energy form-factor falloff scale Lambda_s^2 [GeV^2]
 };
 
-constexpr int NUM_INELASTIC_2TO2_CHANNELS = 57;
+constexpr int NUM_INELASTIC_2TO2_CHANNELS = 62;
 
 HD_INLINE constexpr BinaryInelasticChannel get_inelastic_2to2_channel(int idx) {
     // Channels 0..5:   Ground-state rearrangement, fusion/breakup & charge-exchange
@@ -36,6 +36,7 @@ HD_INLINE constexpr BinaryInelasticChannel get_inelastic_2to2_channel(int idx) {
     // Channels 46..51: Isobar excitation/absorption N + N <-> N + Delta(1232) (I=1 Clebsch-Gordan 3:1:1:1)
     // Channels 52..54: Two-nucleon pion fusion / deuteron pion absorption N + N <-> d + pi (I=1)
     // Channels 55..56: Non-resonant pion-nucleon charge exchange pi + N <-> pi0 + N'
+    // Channels 57..61: A = 6 bound-state transfer (t/3He + 4He <-> N + 6Li/6He) & 6Li*(3+) catalysis
     constexpr BinaryInelasticChannel table[NUM_INELASTIC_2TO2_CHANNELS] = {
         // 1. Ground-state A <= 4 transfer & charge-exchange chemistry
         {PROTON,   TRITON,   NEUTRON,  HELION,   18.0, 1.5},  // p + t <-> n + 3He
@@ -109,14 +110,21 @@ HD_INLINE constexpr BinaryInelasticChannel get_inelastic_2to2_channel(int idx) {
 
         // 8. Non-resonant pion-nucleon charge-exchange background
         {PION_MINUS, PROTON,  PION_ZERO, NEUTRON,   1.2, 0.8},  // pi- + p <-> pi0 + n
-        {PION_PLUS,  NEUTRON, PION_ZERO, PROTON,    1.2, 0.8}   // pi+ + n <-> pi0 + p
+        {PION_PLUS,  NEUTRON, PION_ZERO, PROTON,    1.2, 0.8},  // pi+ + n <-> pi0 + p
+
+        // 9. A = 6 ground-state synthesis & 6Li*(3+) catalysis
+        {TRITON,  ALPHA,  NEUTRON, LI6_GS,  24.0, 2.0},         // t + 4He <-> n + 6Li
+        {HELION,  ALPHA,  PROTON,  LI6_GS,  24.0, 2.0},         // 3He + 4He <-> p + 6Li
+        {TRITON,  ALPHA,  PROTON,  HE6_GS,  18.0, 2.0},         // t + 4He <-> p + 6He
+        {PROTON,  LI6_GS, PROTON,  LI6_219, 32.0, 1.5},         // p + 6Li <-> p + 6Li*(3+)
+        {NEUTRON, LI6_GS, NEUTRON, LI6_219, 32.0, 1.5}          // n + 6Li <-> n + 6Li*(3+)
     };
     return table[idx];
 }
 
 // True if channel involves any A >= 2 nuclear cluster (false for pure N + Delta + pi channels)
 HD_INLINE constexpr bool channel_involves_nuclear_cluster(int ch_idx) {
-    return (ch_idx <= 45) || (ch_idx >= 52 && ch_idx <= 54);
+    return (ch_idx <= 45) || (ch_idx >= 52 && ch_idx <= 54) || (ch_idx >= 57);
 }
 
 // Evaluate nonsingular v_moller * sigma_{in -> out}(s) [fm^2] for a given channel & direction.

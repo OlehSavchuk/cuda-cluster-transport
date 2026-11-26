@@ -192,6 +192,7 @@ struct MixtureConfig {
     bool include_ground_clusters = true;
     bool include_excited_dstar = true;
     bool include_excited_he4 = true;
+    bool include_a56_cascade = false;
     bool include_pions = false;
     bool include_deltas = false;
     bool use_breit_wigner = true;
@@ -212,7 +213,8 @@ inline std::vector<double> build_species_probabilities(double T_gev,
         if (sp.baryon_num == 1 && !sp.is_excited && !mix.include_nucleons) continue;
         if (sp.baryon_num >= 2 && !sp.is_excited && !mix.include_ground_clusters) continue;
         if (sp.baryon_num == 2 && sp.is_excited && !mix.include_excited_dstar) continue;
-        if (sp.baryon_num == 4 && sp.is_excited && !mix.include_excited_he4) continue;
+        if (sp.baryon_num >= 4 && sp.is_excited && !mix.include_excited_he4) continue;
+        if (is_a56_excited(id) && !mix.include_a56_cascade) continue;
 
         double w = equilibrium_density_fm3(
             id, T_gev, mu_B_gev, mu_Q_gev, mix.use_breit_wigner, &norms);
@@ -248,7 +250,8 @@ inline int grand_canonical_test_particles(const GridConfig& grid,
         if (sp.baryon_num == 1 && !sp.is_excited && !mix.include_nucleons) continue;
         if (sp.baryon_num >= 2 && !sp.is_excited && !mix.include_ground_clusters) continue;
         if (sp.baryon_num == 2 && sp.is_excited && !mix.include_excited_dstar) continue;
-        if (sp.baryon_num == 4 && sp.is_excited && !mix.include_excited_he4) continue;
+        if (sp.baryon_num >= 4 && sp.is_excited && !mix.include_excited_he4) continue;
+        if (is_a56_excited(id) && !mix.include_a56_cascade) continue;
 
         double w = equilibrium_density_fm3(
             id, T_gev, mu_B_gev, mu_Q_gev, mix.use_breit_wigner, &norms);

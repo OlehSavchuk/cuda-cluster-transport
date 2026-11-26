@@ -1,10 +1,10 @@
-# CUDA Relativistic Nucleon & Light-Cluster Transport
+# CUDA Relativistic Hadron & Light-Cluster ($A \le 6$) Transport
 
-[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-17%2F17%20passing-brightgreen)](#verification-suite)
+[![Build & Physics Verification Suite](https://img.shields.io/badge/tests-18%2F18%20passing-brightgreen)](#verification-suite)
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A GPU-native relativistic Vlasov–Boltzmann (BUU) transport code written in **CUDA C++17** for **protons, neutrons, pions ($\pi^-, \pi^0, \pi^+$), $\Delta(1232)$ resonances ($\Delta^-, \Delta^0, \Delta^+, \Delta^{++}$), and light nuclear clusters ($A \le 4$) including their discrete excited states** ($d^*$ spin-singlet isospin triplet and 19 excited $A=4$ states ${}^4\text{He}^*$, ${}^4\text{H}^*$, ${}^4\text{Li}^*$), featuring **Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), heavy-ion collision initialization & FOPI anisotropic flow observables ($v_1, v_2, dN/dy$), binary 3D local energy & baryon density grid output (`CHYD`), off-shell Breit–Wigner spectral functions, $2 \leftrightarrow 1$ resonance formation/decay ($\pi N \leftrightarrow \Delta$, $NN \leftrightarrow d^*$, $N A_3 / dd \leftrightarrow {}^4\text{He}^*$), 57 reversible $2 \leftrightarrow 2$ inelastic hadronic/nuclear channels ($NN \leftrightarrow N\Delta$, $NN \leftrightarrow d\pi$, $\pi N$ charge exchange, cluster transfer & catalysis), and Glauber elastic scattering**.
+A GPU-native relativistic Vlasov–Boltzmann (BUU) transport and Eckart-frame HCGF freeze-out code written in **CUDA C++17** for **58 hadronic and nuclear species ($A \le 6$)**: **protons, neutrons, pions ($\pi^-, \pi^0, \pi^+$), $\Delta(1232)$ resonances ($\Delta^-, \Delta^0, \Delta^+, \Delta^{++}$), bound light nuclei ($d, t, {}^3\text{He}, {}^4\text{He}, {}^6\text{He}, {}^6\text{Li}$), and 43 discrete TUNL excited/particle-unstable nuclear resonances** across $A=2$ ($nn^*, d^*, pp^*$), $A=4$ (${}^4\text{H}^*, {}^4\text{He}^*, {}^4\text{Li}^*$), $A=5$ (${}^5\text{H}, {}^5\text{He}, {}^5\text{Li}$), and $A=6$ (${}^6\text{H}, {}^6\text{He}^*, {}^6\text{Li}^*, {}^6\text{Be}$). Features **Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), heavy-ion collision initialization & FOPI flow observables ($v_1, v_2, dN/dy$), 24-field baryon-only Eckart-frame stress-energy tensor export (`HCGF`) & local freeze-out clusterization (`--cluster-mode freezeout`), off-shell Breit–Wigner spectral functions, multi-step sequential resonance cascade decays, $2 \leftrightarrow 1$ resonance formation/decay, 62 reversible $2 \leftrightarrow 2$ inelastic channels, and Glauber elastic scattering**.
 
 When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaussian smearing, dynamic slot compaction, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic reaction/decay kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
 
@@ -12,7 +12,14 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### 1. Microscopic Dynamical Clusters vs. Baryon-Only Eckart-Frame ($u^0 E - \vec{P}\cdot\vec{u}$) HCGF Freeze-Out ($n_B < n_{\text{fr}} = \rho_0 / 8$)
+### 1. Extended $A = 4, 5, 6$ Isotope & TUNL Resonance Catalog (58 Species, Multi-Step Cascade Feed-Down)
+High-statistics FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ benchmark (`scripts/run_a456_isotope_benchmark.py`, `--max-cluster-A 6`) comparing **58-species $A \le 6$ Eckart-frame freeze-out** ($n_{\text{fr}} = \rho_0 / 8$) and **microscopic BUU** against $A \le 4$ baselines and FOPI Collaboration data, resolving bound ${}^6\text{He}, {}^6\text{Li}$ production alongside sequential cascade feed-down from ${}^5\text{He}, {}^5\text{Li}, {}^6\text{He}^*, {}^6\text{Li}^*, {}^6\text{Be}^*$ into ${}^4\text{He}$, $t$, and ${}^3\text{He}$:
+
+<p align="center">
+  <img src="assets/fopi_a456_isotopes_benchmark.png" alt="FOPI Au+Au 250 A MeV A=4,5,6 Isotopes and Cascade Feed-Down Benchmark" width="100%">
+</p>
+
+### 2. Microscopic Dynamical Clusters vs. Baryon-Only Eckart-Frame ($u^0 E - \vec{P}\cdot\vec{u}$) HCGF Freeze-Out ($n_B < n_{\text{fr}} = \rho_0 / 8$)
 High-statistics (`27,500` $\text{Au}+\text{Au}$ events = $10.84\;\text{M}$ test nucleons, `scripts/run_highstat_rho0_over_8.py`) side-by-side benchmark in FOPI $\text{Au}+\text{Au}$ @ $250\,A\;\text{MeV}$ (`MD-Soft`) between **full microscopic dynamical cluster transport** (`--cluster-mode microscopic`) and **pure hadronic ($N + \Delta + \pi$) transport** with baryon-only **Eckart-frame** 24-field `HCGF` stress-energy tensor $T_B^{\mu\nu}$ export (`--dump-tmunu-dir`), cell rest-frame energy $E_{\text{rest}} = u^0 E - \vec{P}\cdot\vec{u}$ EoS inversion, and conservative Mott re-melting of back-emitted particles at $n_{\text{fr}} = \rho_0 / 8 = 0.020\;\text{fm}^{-3}$ (`--cluster-mode freezeout --backflow remelt --nfr 0.02`):
 
 <p align="center">
@@ -114,18 +121,20 @@ In a 3D periodic torus $[0, L)^3$, an initially momentum-anisotropic multi-speci
 
 ## Physics Model
 
-### Complete 28-Species Catalog ($A \le 4$, Ground + Excited)
+### Complete 58-Species Catalog (Hadrons + $A \le 6$ Bound & TUNL Excited Isotopes)
 Defined in [`include/physics/species.cuh`](include/physics/species.cuh):
 
 | Family | Species | $A$ | $Z$ | $J^\pi$ | $I$ | Notes |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Nucleons** | $p,\; n$ | 1 | 1, 0 | $1/2^+$ | $1/2$ | AME2020 / CODATA masses |
-| **Dinucleons** | $d$ | 2 | 1 | $1^+$ | $0$ | Ground-state deuteron ($R_{\text{rms}} = 2.14\;\text{fm}$) |
-| **Excited $A=2$** | $nn^*(0^+),\; d^*(0^+),\; pp^*(0^+)$ | 2 | 0, 1, 2 | $0^+$ | $1$ | Spin-singlet virtual/resonant isospin triplet ($R_{\text{rms}} = 3.80\;\text{fm}$) |
-| **Trinucleons** | $t,\; {}^3\text{He}$ | 3 | 1, 2 | $1/2^+$ | $1/2$ | Ground-state $A=3$ mirror doublet |
-| **Alpha (g.s.)** | ${}^4\text{He}$ | 4 | 2 | $0^+$ | $0$ | Compact ground state ($R_{\text{rms}} = 1.68\;\text{fm}$) |
-| **Excited ${}^4\text{He}^*$** | 17 discrete TUNL levels | 4 | 2 | $0^\pm, 1^\pm, 2^\pm$ | $0, 1$ | $E_x = 20.21\;\text{MeV}$ ($0^+$ breathing mode) to $29.89\;\text{MeV}$ ($2^+$) |
-| **Isobaric $A=4^*$** | ${}^4\text{H}^*(2^-),\; {}^4\text{Li}^*(2^-)$ | 4 | 1, 3 | $2^-$ | $1$ | $I=1$ resonant partners above $t+n$ and ${}^3\text{He}+p$ |
+| **Pions & $\Delta(1232)$** | $\pi^{-,0,+},\; \Delta^{-,0,+,++}$ | 0, 1 | $-1..+2$ | $0^-,\; 3/2^+$ | $1,\; 3/2$ | $p$-wave Breit–Wigner $\Delta(1232)$ quartet ($\Gamma_0 = 118\;\text{MeV}$) |
+| **Dinucleons ($A=2$)** | $d,\; nn^*(0^+),\; d^*(0^+),\; pp^*(0^+)$ | 2 | 0, 1, 2 | $1^+,\; 0^+$ | $0,\; 1$ | Bound deuteron + spin-singlet virtual/resonant $I=1$ triplet |
+| **Trinucleons ($A=3$)** | $t,\; {}^3\text{He}$ | 3 | 1, 2 | $1/2^+$ | $1/2$ | Bound $A=3$ mirror doublet |
+| **Alpha & ${}^4\text{He}^*$** | ${}^4\text{He}$ + 17 discrete TUNL levels | 4 | 2 | $0^\pm, 1^\pm, 2^\pm$ | $0, 1$ | Compact g.s. + $E_x = 20.21\;\text{MeV}$ ($0^+$) to $29.89\;\text{MeV}$ ($2^+$) |
+| **Isobaric $A=4^*$** | 4 ${}^4\text{H}^*$ + 4 ${}^4\text{Li}^*$ levels | 4 | 1, 3 | $2^-, 1^-, 0^-$ | $1$ | Complete low-lying TUNL $p$-wave spin-orbit quartets ($t+n$, ${}^3\text{He}+p$) |
+| **Unbound $A=5$** | ${}^5\text{H}(1/2^+)$, 3 ${}^5\text{He}^*$, 3 ${}^5\text{Li}^*$ | 5 | 1, 2, 3 | $1/2^\pm, 3/2^\pm$ | $3/2, 1/2$ | Includes $p_{3/2}, p_{1/2}$ $\alpha+N$ resonances & $3/2^+$ $d+t / d+{}^3\text{He}$ fusion peaks |
+| **Bound $A=6$** | ${}^6\text{He}(0^+),\; {}^6\text{Li}(1^+)$ | 6 | 2, 3 | $0^+,\; 1^+$ | $1,\; 0$ | Borromean halo ${}^6\text{He}$ ($B=29.27\;\text{MeV}$) & stable ${}^6\text{Li}$ ($B=31.99\;\text{MeV}$) |
+| **Resonant $A=6^*$** | ${}^6\text{H}(2^-),\; {}^6\text{He}^*(2^+)$, 4 ${}^6\text{Li}^*$, 2 ${}^6\text{Be}^*$ | 6 | 1..4 | $0^+, 1^+, 2^\pm, 3^+$ | $0, 1, 2$ | Multi-step sequential decays (${}^6\text{Be}\to p+{}^5\text{Li}\to 2p+\alpha$, ${}^6\text{Li}^*\to d+\alpha$) |
 
 ### Cancellation-Free Relativistic Kinematics
 In [`include/physics/kinematics.cuh`](include/physics/kinematics.cuh), invariant pair quantities are evaluated via the algebraic identity
@@ -158,12 +167,12 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 │   │   ├── cuda_compat.cuh         # DeviceBuffer<T>, atomic wrappers, CUDA/CPU portability macros
 │   │   └── philox_rng.cuh          # Stateless counter-based Philox4x32-10 PRNG (zero VRAM state)
 │   ├── physics/
-│   │   ├── constants.cuh           # Physical constants, nucleon, pion, Delta & AME2020 masses
-│   │   ├── species.cuh             # 35-species nucleon + pion + Delta + cluster + excited table
+│   │   ├── constants.cuh           # Physical constants, nucleon, pion, Delta & AME2020 A<=6 masses
+│   │   ├── species.cuh             # 58-species hadron + A<=6 bound & TUNL resonance catalog
 │   │   ├── kinematics.cuh          # Cancellation-free Moller flux, CM boosts, 2->2 & 1->2 decays
 │   │   ├── cross_sections.cuh      # ERE+KK+Cugnon NN, pi-hadron & Gaussian Glauber cross sections
-│   │   ├── resonances.cuh          # Relativistic Breit-Wigner spectral functions & BW samplers
-│   │   ├── inelastic_channels.cuh  # 57 reversible 2<->2 NN<->NDelta, dpi, transfer & excitation rules
+│   │   ├── resonances.cuh          # Core-refined Breit-Wigner spectral functions & BW samplers
+│   │   ├── inelastic_channels.cuh  # 62 reversible 2<->2 NN<->NDelta, dpi, A<=6 transfer & excitation
 │   │   └── mean_field.cuh          # Skyrme + Lorentzian MD potential, CIC Vlasov & smoothing
 │   └── sim/
 │       ├── particles.cuh           # Dynamic SoA layout with GPU atomic appends & compaction
@@ -171,14 +180,16 @@ Diffuse excited states such as $d^*(0^+)$ and the ${}^4\text{He}^*(20.21, 0^+)$ 
 │       ├── stepper.cuh             # Symplectic Strang-split Vlasov + decay + stochastic collisions
 │       ├── init_conditions.cuh     # Woods-Saxon + Thomas-Fermi HIC, grand-canonical & fireball
 │       ├── hydro_io.cuh            # Binary 3D local energy & baryon density grid writer ("CHYD")
-│       ├── hcgf_io.cuh             # 24-field HCGF T^munu + J_B^mu + J_Q^mu + Landau frame exporter
-│       ├── freezeout_clusters.cuh  # Grid cell n_B < n_fr tracker & conservative thermal clusterizer
-│       ├── flow_observables.cuh    # Freeze-out resonance decay & FOPI dN/dy, v1, v2 calculator
+│       ├── hcgf_io.cuh             # 24-field baryon Eckart HCGF T_B^munu + J_B^mu + J_Q^mu exporter
+│       ├── freezeout_clusters.cuh  # Eckart cell n_B < n_fr A<=6 clusterizer & Mott backflow remelter
+│       ├── flow_observables.cuh    # Multi-step resonance cascade decay & FOPI A<=6 flow calculator
 │       └── observables.cuh         # Parallel GPU reductions for P^mu, B, Q, T^ij & mass moments
 ├── src/
 │   ├── main.cu                     # CLI simulation driver, CSV logger & binary HCGF/CHYD exporters
-│   └── tests.cu                    # Automated physics, Vlasov, HCGF & detailed-balance suite
+│   └── tests.cu                    # Automated 18-test physics, Vlasov, HCGF & A<=6 cascade suite
 ├── scripts/
+│   ├── run_a456_isotope_benchmark.py
+│   ├── run_highstat_rho0_over_8.py
 │   ├── compare_microscopic_vs_hcgf_freezeout.py
 │   ├── generate_pion_delta_physics.py
 │   ├── generate_auau_fopi_plots.py # FOPI Au+Au 250 AMeV 3D+hydro animation & v1/v2/dNdy plots
@@ -276,12 +287,12 @@ python3 scripts/generate_animations.py
 15. **`test_hic_pion_and_delta_production`**: Verifies dynamical $\Delta(1232)$ excitation, $\pi^-/\pi^+$ neutron-rich isospin asymmetry, and machine-precision Hamiltonian conservation (`|dH|/H = 1.24e-15`) in $\text{Au}+\text{Au}$ @ $800\,A\;\text{MeV}$.
 16. **`test_hcgf_baryon_eckart_frame`**: Verifies 24-field baryon-only `HCGF` $T_B^{\mu\nu} + J_B^\mu + J_{Q,B}^\mu$ conservation (excluding injected counter-streaming pions) and exact relativistic Eckart 4-velocity $u^\mu = J_B^\mu / n_B$ recovery.
 17. **`test_eckart_freezeout_and_remelt`**: Verifies cluster-free pure $N+\Delta+\pi$ transport (`--cluster-mode none`), Eckart $E_{\text{rest}} = u^0 E - \vec{P}\cdot\vec{u}$ local thermal clusterization (`--cluster-mode freezeout`), and conservative Mott re-melting (`25/25`) of back-emitted clusters re-entering dense $n_B > n_{\text{melt}}$ matter ($|\Delta E|/E < 10^{-13}$, $\Delta B = \Delta Q = 0$).
+18. **`test_a456_isotopes_and_cascade_decays`**: Verifies all 58 species ($A \le 6$ isotopes ${}^4\text{H}, {}^4\text{He}, {}^4\text{Li}, {}^5\text{H}, {}^5\text{He}, {}^5\text{Li}, {}^6\text{H}, {}^6\text{He}, {}^6\text{Li}, {}^6\text{Be}$), core-refined spectral normalization down to $\Gamma = 24\;\text{keV}$ (`LI6_219`), multi-step cascade decays (`6H -> 5H+n -> t+3n`, `6Be* -> 5Li+p / 4He+pp* -> 4He+2p`, $|\Delta E|/E < 10^{-13}$), and $2.5\times$ $\alpha$ feed-down at $n_B = \rho_0 / 8$.
 
 ## Roadmap
-- [x] Covariant $2 \to 2$ elastic scattering for $p, n, d, d^*, t, {}^3\text{He}, {}^4\text{He}$, and 19 excited $A=4^*$ states on CUDA
-- [x] Relativistic Breit–Wigner spectral functions and $2 \leftrightarrow 1$ resonance formation/decay ($d^* \leftrightarrow N+N$, ${}^4\text{He}^* \leftrightarrow p+t / n+{}^3\text{He} / d+d$, ${}^4\text{H}^* \leftrightarrow n+t$, ${}^4\text{Li}^* \leftrightarrow p+{}^3\text{He}$)
-- [x] Reversible $2 \leftrightarrow 2$ nuclear transfer ($dd \leftrightarrow pt/n\,{}^3\text{He}$, $dt \leftrightarrow n\alpha$, $d\,{}^3\text{He} \leftrightarrow p\alpha$), deuteron catalysis ($N+d \leftrightarrow N+d^*$), and ${}^4\text{He} \leftrightarrow {}^4\text{He}^*$ excitation with off-shell detailed balance
+- [x] Covariant $2 \to 2$ elastic scattering, Breit–Wigner spectral functions, and $2 \leftrightarrow 1$ / $2 \leftrightarrow 2$ detailed balance across **58 species** ($p, n, \pi, \Delta(1232)$, bound $d, t, {}^3\text{He}, {}^4\text{He}, {}^6\text{He}, {}^6\text{Li}$, and 43 TUNL $A=2,4,5,6$ resonances)
 - [x] Skyrme + Lorentzian momentum-dependent mean-field potential (`SkyrmeSoft`, `MDSoft`, `MDStiff`) with baryon/isospin-additive cluster folding and symplectic CIC Vlasov kernels
-- [x] Heavy-ion collision initialization (`--mode hic`), FOPI flow observables ($v_1, v_2, dN/dy$), and binary 3D local energy & baryon density grid output (`CHYD`)
+- [x] Heavy-ion collision initialization (`--mode hic`), FOPI flow observables ($v_1, v_2, dN/dy$ for $A \le 6$), and binary 3D local energy & baryon density grid output (`CHYD`)
 - [x] Pion ($\pi^-, \pi^0, \pi^+$) and $\Delta(1232)$ ($\Delta^-, \Delta^0, \Delta^+, \Delta^{++}$) spectral transport with $\pi N \leftrightarrow \Delta$, $NN \leftrightarrow N\Delta$, and $NN \leftrightarrow d\pi$ detailed balance
+- [x] Baryon-only Eckart-frame 24-field `HCGF` $T_B^{\mu\nu}$ export, local rest-frame energy $E_{\text{rest}} = u^0 E - \vec{P}\cdot\vec{u}$ thermal clusterization (`--cluster-mode freezeout --max-cluster-A 6`), and conservative Mott backflow re-melting
 - [ ] GPU 6D phase-space Pauli blocking $(1 - f_3)(1 - f_4)$ & Bose enhancement + direct $2 \leftrightarrow 3$ channels

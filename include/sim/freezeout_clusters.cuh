@@ -38,7 +38,8 @@ struct FreezeoutConfig {
     double n_fr_fm3 = 0.040;          // Freeze-out Eckart baryon density threshold (~rho_0 / 4) [fm^-3]
     double melt_factor = 1.15;        // Hysteresis ratio n_melt / n_fr for re-entering dense matter
     double min_time_fm = 0.0;         // Minimum time before expansion freeze-out check activates [fm/c]
-    bool include_excited_clusters = true;  // Include d* and 4He* statistical states (feed-down to p,n,d,t,3He)
+    int max_cluster_A = 6;            // Max nuclear mass number A included in EoS & sampling (up to 6!)
+    bool include_excited_clusters = true;  // Include d* and A=4,5,6 statistical resonances (feed-down!)
     std::string cells_csv_path;       // Optional CSV log of every freeze-out cell (t, x, y, z, T, muB, muQ, u^mu)
 };
 
@@ -91,7 +92,7 @@ inline void species_thermal_moments(int sp_id, double T_gev, double& phi_fm3, do
 
 // Given (T_gev, nB_fm3, Yp), solve exact 2x2 SPD Newton system for (u_p, u_n) = ((mu_p-m_p)/T, (mu_n-m_n)/T)
 // and return equilibrium densities n_sp[NUM_SPECIES] + energy per baryon e_per_baryon_gev.
-inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool inc_exc,
+inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool inc_exc, int max_A,
                                    double n_out[NUM_SPECIES], double& out_up, double& out_un) {
     const double np_tgt = std::max(1.0e-9, Yp * nB_fm3);
     const double nn_tgt = std::max(1.0e-9, (1.0 - Yp) * nB_fm3);
@@ -99,7 +100,7 @@ inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool 
     double phi[NUM_SPECIES] = {}, erel[NUM_SPECIES] = {};
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
-        if (is_pion(id) || is_delta(id)) continue;
+        if (is_pion(id) || is_delta(id) || sp.baryon_num > max_A) continue;
         if (sp.is_excited && !inc_exc) continue;
         species_thermal_moments(id, T_gev, phi[id], erel[id]);
     }
@@ -139,23 +140,23 @@ inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool 
 namespace fo_detail {
 
 // Invert HCGF Nuclear-Cluster EoS (nB, Yp, e_th_per_baryon) -> (T_gev, muB_gev, muQ_gev, n_eq[NUM_SPECIES])
-inline void invert_local_cluster_eos(double nB_fm3, double Yp, double e_th_gev, bool inc_exc,
+inline void invert_local_cluster_eos(double nB_fm3, double Yp, double e_th_gev, bool inc_exc, int max_A,
                                      double& T_gev, double& muB_gev, double& muQ_gev,
                                      double n_eq[NUM_SPECIES]) {
     double T_lo = 0.0015, T_hi = 0.120;
     double up = 0.0, un = 0.0;
-    const double e_lo = solve_hrg_fugacities(T_lo, nB_fm3, Yp, inc_exc, n_eq, up, un);
+    const double e_lo = solve_hrg_fugacities(T_lo, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un);
     if (e_th_gev <= e_lo) {
         T_gev = T_lo;
     } else {
         for (int b = 0; b < 22; ++b) {
             const double T_mid = 0.5 * (T_lo + T_hi);
-            const double e_mid = solve_hrg_fugacities(T_mid, nB_fm3, Yp, inc_exc, n_eq, up, un);
+            const double e_mid = solve_hrg_fugacities(T_mid, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un);
             if (e_mid < e_th_gev) T_lo = T_mid;
             else T_hi = T_mid;
         }
         T_gev = 0.5 * (T_lo + T_hi);
-        solve_hrg_fugacities(T_gev, nB_fm3, Yp, inc_exc, n_eq, up, un);
+        solve_hrg_fugacities(T_gev, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un);
     }
     // mu_n = m_n + T * u_n == mu_B;   mu_p = m_p + T * u_p == mu_B + mu_Q
     muB_gev = phys::MASS_NEUTRON + T_gev * un;
@@ -460,7 +461,7 @@ public:
 
             double T_gev = 0.0, muB_gev = 0.0, muQ_gev = 0.0, n_eq[NUM_SPECIES] = {};
             fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
-                                                T_gev, muB_gev, muQ_gev, n_eq);
+                                                cfg_.max_cluster_A, T_gev, muB_gev, muQ_gev, n_eq);
 
             const int ix = c % gcfg_.nx, iy = (c / gcfg_.nx) % gcfg_.ny, iz = c / (gcfg_.nx * gcfg_.ny);
             FreezeoutCellRecord rec{};
@@ -489,8 +490,8 @@ public:
             std::vector<int> out_species;
             int rem_p = Np, rem_n = Nn, n_cl_formed = 0;
             double m_out_pole = 0.0;
-            // Sample heaviest clusters first so rare 4He / 3He / t aren't starved by d draws
-            for (int target_A : {4, 3, 2}) {
+            // Sample heaviest clusters first (A = max_cluster_A .. 2) so rare A=5,6,4 isotopes aren't starved
+            for (int target_A = cfg_.max_cluster_A; target_A >= 2; --target_A) {
                 for (int id = 0; id < NUM_SPECIES; ++id) {
                     const SpeciesInfo sp = get_species_info(id);
                     if (sp.baryon_num != target_A || n_eq[id] <= 0.0) continue;

@@ -24,6 +24,8 @@ constexpr double MASS_DEUTERON = 1.87561294257;
 constexpr double MASS_TRITON = 2.80892113298;
 constexpr double MASS_HELION = 2.80839160743;
 constexpr double MASS_ALPHA = 3.7273794066;
+constexpr double MASS_HE6 = 5.60553516;   // 6He g.s. (0+, B = 29.271 MeV, 2n halo)
+constexpr double MASS_LI6 = 5.60151816;   // 6Li g.s. (1+, B = 31.994 MeV)
 
 // Pion and Delta(1232) resonance pole masses (PDG, in GeV)
 constexpr double MASS_PION_CHARGED = 0.13957039;
