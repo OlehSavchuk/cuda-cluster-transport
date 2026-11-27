@@ -46,19 +46,19 @@ namespace detail {
 
 #if TRANSPORT_HAS_CUDA
 __global__ void reduce_observables_kernel(ParticleSoAView p,
-                                          double* d_scalars,          // [8]: E, Px, Py, Pz, Txx, Tyy, Tzz, r2
-                                          unsigned long long* d_bq,   // [3]: B, Q, active_count
+                                          double* d_scalars,          // [10]: E, Px, Py, Pz, Txx, Tyy, Tzz, r2, B_w, Q_w
+                                          unsigned long long* d_bq,   // [3]: unused, unused, active_count
                                           int* d_counts,              // [NUM_SPECIES]
                                           double* d_ke_sum,           // [NUM_SPECIES]
                                           double* d_mass_sum) {       // [NUM_SPECIES]
-    __shared__ double sh_sc[8];
-    if (threadIdx.x < 8) sh_sc[threadIdx.x] = 0.0;
+    __shared__ double sh_sc[10];
+    if (threadIdx.x < 10) sh_sc[threadIdx.x] = 0.0;
     __syncthreads();
 
     double lE = 0.0, lPx = 0.0, lPy = 0.0, lPz = 0.0;
     double lTxx = 0.0, lTyy = 0.0, lTzz = 0.0, lr2 = 0.0;
-    unsigned long long lB = 0ULL, lAct = 0ULL;
-    long long lQ = 0LL;
+    double lB = 0.0, lQ = 0.0;
+    unsigned long long lAct = 0ULL;
 
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < p.n; i += blockDim.x * gridDim.x) {
         if (!p.active[i]) continue;
@@ -83,13 +83,12 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
         lTyy += w_fo * py * py * inv_E;
         lTzz += w_fo * pz * pz * inv_E;
         lr2 += w_fo * (p.x[i] * p.x[i] + p.y[i] * p.y[i] + p.z[i] * p.z[i]);
-
-        lB += static_cast<unsigned long long>(sp.baryon_num);
-        lQ += static_cast<long long>(sp.charge);
+        lB += w_fo * static_cast<double>(sp.baryon_num);
+        lQ += w_fo * static_cast<double>(sp.charge);
         lAct += 1ULL;
 
         atomicAdd(&d_counts[sp_id], 1);
-        portable_atomic_add_double(&d_ke_sum[sp_id], E - m);
+        portable_atomic_add_double(&d_ke_sum[sp_id], w_fo * (E - m));
         portable_atomic_add_double(&d_mass_sum[sp_id], m);
     }
 
@@ -101,13 +100,13 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
     portable_atomic_add_double(&sh_sc[5], lTyy);
     portable_atomic_add_double(&sh_sc[6], lTzz);
     portable_atomic_add_double(&sh_sc[7], lr2);
+    portable_atomic_add_double(&sh_sc[8], lB);
+    portable_atomic_add_double(&sh_sc[9], lQ);
 
-    if (lB > 0) atomicAdd(&d_bq[0], lB);
-    if (lQ != 0LL) atomicAdd(&d_bq[1], static_cast<unsigned long long>(lQ));
     if (lAct > 0) atomicAdd(&d_bq[2], lAct);
     __syncthreads();
 
-    if (threadIdx.x < 8) {
+    if (threadIdx.x < 10) {
         portable_atomic_add_double(&d_scalars[threadIdx.x], sh_sc[threadIdx.x]);
     }
 }
@@ -118,7 +117,7 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
 class ObservableCalculator {
 public:
     ObservableCalculator() {
-        d_scalars_.resize(8);
+        d_scalars_.resize(10);
         d_bq_.resize(3);
         d_counts_.resize(NUM_SPECIES);
         d_ke_sum_.resize(NUM_SPECIES);
@@ -148,9 +147,9 @@ public:
             d_counts_.data(), d_ke_sum_.data(), d_mass_sum_.data());
         CUDA_CHECK(cudaGetLastError());
 
-        double h_sc[8] = {};
+        double h_sc[10] = {};
         unsigned long long h_bq[3] = {};
-        d_scalars_.copy_to_host(h_sc, 8);
+        d_scalars_.copy_to_host(h_sc, 10);
         d_bq_.copy_to_host(h_bq, 3);
         d_counts_.copy_to_host(obs.counts.data(), NUM_SPECIES);
         d_ke_sum_.copy_to_host(obs.kinetic_energy_sum.data(), NUM_SPECIES);
@@ -164,8 +163,8 @@ public:
         obs.Tyy_sum = h_sc[5];
         obs.Tzz_sum = h_sc[6];
         obs.r_sq_sum = h_sc[7];
-        obs.baryon_tot = static_cast<long long>(h_bq[0]);
-        obs.charge_tot = static_cast<long long>(h_bq[1]);
+        obs.baryon_tot = std::llround(h_sc[8]);
+        obs.charge_tot = std::llround(h_sc[9]);
         obs.n_active = static_cast<int>(h_bq[2]);
 #else
         double b_acc = 0.0, q_acc = 0.0;

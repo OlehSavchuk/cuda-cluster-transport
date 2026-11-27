@@ -89,6 +89,7 @@ public:
         const std::size_t cap = (n_live * 2 + 8192 > capacity_) ? (n_live * 2 + 8192) : capacity_;
         allocate_capacity(cap);
         n_slots_ = static_cast<int>(n_live);
+        ++mutation_epoch_;
         sync_slot_counter_to_device();
     }
 
@@ -120,43 +121,45 @@ public:
             allocate_capacity(needed_cap);
         }
         n_slots_ = static_cast<int>(n);
+        ++mutation_epoch_;
         sync_slot_counter_to_device();
 
         if (n == 0) return;
 
-        std::vector<int> hact(n, 1), hsp(n), hcell(n, -1), hcol(n, 0), hfr(n, 0);
-        std::vector<Real> ht(n), hx(n), hy(n), hz(n);
-        std::vector<Real> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
+        for (auto& v : stage_i_) v.resize(n);
+        for (auto& v : stage_r_) v.resize(n);
+        std::fill_n(stage_i_[0].data(), n, 1);
+        std::fill_n(stage_i_[2].data(), n, -1);
 
         for (std::size_t i = 0; i < n; ++i) {
-            ht[i] = static_cast<Real>(host_p[i].t);
-            hx[i] = static_cast<Real>(host_p[i].x);
-            hy[i] = static_cast<Real>(host_p[i].y);
-            hz[i] = static_cast<Real>(host_p[i].z);
-            hE[i] = static_cast<Real>(host_p[i].E);
-            hpx[i] = static_cast<Real>(host_p[i].px);
-            hpy[i] = static_cast<Real>(host_p[i].py);
-            hpz[i] = static_cast<Real>(host_p[i].pz);
-            hmass[i] = static_cast<Real>(host_p[i].mass);
-            hsp[i] = host_p[i].species;
-            hcol[i] = host_p[i].collided;
-            hfr[i] = host_p[i].freezeout_tag;
+            stage_r_[0][i] = static_cast<Real>(host_p[i].t);
+            stage_r_[1][i] = static_cast<Real>(host_p[i].x);
+            stage_r_[2][i] = static_cast<Real>(host_p[i].y);
+            stage_r_[3][i] = static_cast<Real>(host_p[i].z);
+            stage_r_[4][i] = static_cast<Real>(host_p[i].E);
+            stage_r_[5][i] = static_cast<Real>(host_p[i].px);
+            stage_r_[6][i] = static_cast<Real>(host_p[i].py);
+            stage_r_[7][i] = static_cast<Real>(host_p[i].pz);
+            stage_r_[8][i] = static_cast<Real>(host_p[i].mass);
+            stage_i_[1][i] = host_p[i].species;
+            stage_i_[3][i] = host_p[i].collided;
+            stage_i_[4][i] = host_p[i].freezeout_tag;
         }
 
-        copy_prefix_to_device(active_, hact);
-        copy_prefix_to_device(t_, ht);
-        copy_prefix_to_device(x_, hx);
-        copy_prefix_to_device(y_, hy);
-        copy_prefix_to_device(z_, hz);
-        copy_prefix_to_device(E_, hE);
-        copy_prefix_to_device(px_, hpx);
-        copy_prefix_to_device(py_, hpy);
-        copy_prefix_to_device(pz_, hpz);
-        copy_prefix_to_device(mass_, hmass);
-        copy_prefix_to_device(species_, hsp);
-        copy_prefix_to_device(cell_id_, hcell);
-        copy_prefix_to_device(collided_, hcol);
-        copy_prefix_to_device(freezeout_tag_, hfr);
+        copy_prefix_to_device(active_, stage_i_[0], n);
+        copy_prefix_to_device(t_, stage_r_[0], n);
+        copy_prefix_to_device(x_, stage_r_[1], n);
+        copy_prefix_to_device(y_, stage_r_[2], n);
+        copy_prefix_to_device(z_, stage_r_[3], n);
+        copy_prefix_to_device(E_, stage_r_[4], n);
+        copy_prefix_to_device(px_, stage_r_[5], n);
+        copy_prefix_to_device(py_, stage_r_[6], n);
+        copy_prefix_to_device(pz_, stage_r_[7], n);
+        copy_prefix_to_device(mass_, stage_r_[8], n);
+        copy_prefix_to_device(species_, stage_i_[1], n);
+        copy_prefix_to_device(cell_id_, stage_i_[2], n);
+        copy_prefix_to_device(collided_, stage_i_[3], n);
+        copy_prefix_to_device(freezeout_tag_, stage_i_[4], n);
     }
 
     // Download ONLY active particles
@@ -166,40 +169,39 @@ public:
         std::vector<HostParticle> out;
         if (n == 0) return out;
 
-        std::vector<int> hact(n), hsp(n), hcol(n), hfr(n);
-        std::vector<Real> ht(n), hx(n), hy(n), hz(n);
-        std::vector<Real> hE(n), hpx(n), hpy(n), hpz(n), hmass(n);
+        for (auto& v : stage_i_) v.resize(n);
+        for (auto& v : stage_r_) v.resize(n);
 
-        active_.copy_to_host(hact.data(), n);
-        t_.copy_to_host(ht.data(), n);
-        x_.copy_to_host(hx.data(), n);
-        y_.copy_to_host(hy.data(), n);
-        z_.copy_to_host(hz.data(), n);
-        E_.copy_to_host(hE.data(), n);
-        px_.copy_to_host(hpx.data(), n);
-        py_.copy_to_host(hpy.data(), n);
-        pz_.copy_to_host(hpz.data(), n);
-        mass_.copy_to_host(hmass.data(), n);
-        species_.copy_to_host(hsp.data(), n);
-        collided_.copy_to_host(hcol.data(), n);
-        freezeout_tag_.copy_to_host(hfr.data(), n);
+        active_.copy_to_host(stage_i_[0].data(), n);
+        t_.copy_to_host(stage_r_[0].data(), n);
+        x_.copy_to_host(stage_r_[1].data(), n);
+        y_.copy_to_host(stage_r_[2].data(), n);
+        z_.copy_to_host(stage_r_[3].data(), n);
+        E_.copy_to_host(stage_r_[4].data(), n);
+        px_.copy_to_host(stage_r_[5].data(), n);
+        py_.copy_to_host(stage_r_[6].data(), n);
+        pz_.copy_to_host(stage_r_[7].data(), n);
+        mass_.copy_to_host(stage_r_[8].data(), n);
+        species_.copy_to_host(stage_i_[1].data(), n);
+        collided_.copy_to_host(stage_i_[3].data(), n);
+        freezeout_tag_.copy_to_host(stage_i_[4].data(), n);
 
         out.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
-            if (!hact[i]) continue;
+            if (!stage_i_[0][i]) continue;
             HostParticle hp;
-            hp.t = ht[i];
-            hp.x = hx[i];
-            hp.y = hy[i];
-            hp.z = hz[i];
-            hp.E = hE[i];
-            hp.px = hpx[i];
-            hp.py = hpy[i];
-            hp.pz = hpz[i];
-            hp.mass = hmass[i];
-            hp.species = hsp[i];
-            hp.collided = hcol[i];
-            hp.freezeout_tag = hfr[i];
+            hp.t = stage_r_[0][i];
+            hp.x = stage_r_[1][i];
+            hp.y = stage_r_[2][i];
+            hp.z = stage_r_[3][i];
+            hp.E = stage_r_[4][i];
+            hp.px = stage_r_[5][i];
+            hp.py = stage_r_[6][i];
+            hp.pz = stage_r_[7][i];
+            hp.mass = stage_r_[8][i];
+            hp.species = stage_i_[1][i];
+            hp.collided = stage_i_[3][i];
+            hp.freezeout_tag = stage_i_[4][i];
             out.push_back(hp);
         }
         return out;
@@ -262,6 +264,7 @@ public:
         CUDA_CHECK(cudaGetLastError());
 
         d_compact_count_.copy_to_host(&n_slots_, 1);
+        ++mutation_epoch_;
         sync_slot_counter_to_device();
         capacity_ = new_cap;
 
@@ -332,6 +335,8 @@ public:
         return n_slots_;
     }
 
+    std::uint64_t mutation_epoch() const { return mutation_epoch_; }
+
     std::size_t capacity() const { return capacity_; }
 
 private:
@@ -356,23 +361,26 @@ private:
     }
 
     template <typename T>
-    static void copy_prefix_to_device(DeviceBuffer<T>& dst, const std::vector<T>& src) {
-        if (src.empty()) return;
+    static void copy_prefix_to_device(DeviceBuffer<T>& dst, const std::vector<T>& src, std::size_t n) {
+        if (n == 0) return;
 #if TRANSPORT_HAS_CUDA
-        CUDA_CHECK(cudaMemcpy(dst.data(), src.data(), src.size() * sizeof(T), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dst.data(), src.data(), n * sizeof(T), cudaMemcpyHostToDevice));
 #else
-        std::memcpy(dst.data(), src.data(), src.size() * sizeof(T));
+        std::memcpy(dst.data(), src.data(), n * sizeof(T));
 #endif
     }
 
     int n_slots_ = 0;
     std::size_t capacity_ = 0;
+    std::uint64_t mutation_epoch_ = 1;
     DeviceBuffer<int> d_n_slots_;
     DeviceBuffer<int> d_compact_count_;
     DeviceBuffer<int> active_;
     DeviceBuffer<Real> t_, x_, y_, z_;
     DeviceBuffer<Real> E_, px_, py_, pz_, mass_;
     DeviceBuffer<int> species_, cell_id_, collided_, freezeout_tag_;
+    std::vector<int> stage_i_[5];
+    std::vector<Real> stage_r_[9];
 };
 
 }  // namespace transport

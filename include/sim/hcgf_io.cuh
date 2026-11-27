@@ -46,17 +46,19 @@ struct HcgfGridSnapshot {
     std::vector<float> fields[24];
     // 3x3 Eckart rest-frame baryon kinetic stress tensor [Pxx*, Pxy*, Pxz*, Pyy*, Pyz*, Pzz*] [GeV/fm^3]
     std::vector<float> pkin_eckart[6];
+    bool has_frozen_particles = false;
 };
 
 namespace hcgf_detail {
 
 // Exact Lorentz boost projection P*_ij = L^i_mu L^j_nu T^munu into rest frame moving at v = (vx, vy, vz)
-inline void project_stress_to_rest_frame(double vx, double vy, double vz,
-                                         double T00, double T0x, double T0y, double T0z,
-                                         double Txx, double Txy, double Txz,
-                                         double Tyy, double Tyz, double Tzz,
-                                         double Pstar[6]) {
-    const double v2 = std::min(0.9990, vx * vx + vy * vy + vz * vz);
+HD_INLINE void project_stress_to_rest_frame(double vx, double vy, double vz,
+                                            double T00, double T0x, double T0y, double T0z,
+                                            double Txx, double Txy, double Txz,
+                                            double Tyy, double Tyz, double Tzz,
+                                            double Pstar[6]) {
+    const double v2_raw = vx * vx + vy * vy + vz * vz;
+    const double v2 = (v2_raw < 0.9990) ? v2_raw : 0.9990;
     const double u0 = 1.0 / std::sqrt(1.0 - v2);
     const double ux = u0 * vx, uy = u0 * vy, uz = u0 * vz;
     const double ig = 1.0 / (u0 + 1.0);
@@ -85,12 +87,12 @@ inline void project_stress_to_rest_frame(double vx, double vy, double vz,
 // Extract Eckart collective 4-velocity u^mu = J_B^mu / n_B = gamma_E * (1, v_E) from baryon 4-current,
 // and project baryon stress-energy tensor T_B^munu into the Eckart rest frame:
 //   eps_E = u_mu T_B^munu u_nu,   P_E = (eps_E - g_munu T_B^munu) / 3
-inline void eval_eckart_frame(double JB0, double JBx, double JBy, double JBz,
-                              double T00, double T0x, double T0y, double T0z,
-                              double Txx, double Txy, double Txz,
-                              double Tyy, double Tyz, double Tzz,
-                              double& nB_e, double& eps_e, double& P_e,
-                              double& vx_e, double& vy_e, double& vz_e) {
+HD_INLINE void eval_eckart_frame(double JB0, double JBx, double JBy, double JBz,
+                                 double T00, double T0x, double T0y, double T0z,
+                                 double Txx, double Txy, double Txz,
+                                 double Tyy, double Tyz, double Tzz,
+                                 double& nB_e, double& eps_e, double& P_e,
+                                 double& vx_e, double& vy_e, double& vz_e) {
     if (JB0 <= 1.0e-12 || T00 <= 1.0e-12) {
         nB_e = 0.0; eps_e = 0.0; P_e = 0.0;
         vx_e = 0.0; vy_e = 0.0; vz_e = 0.0;
@@ -176,15 +178,190 @@ inline void compute_pratt_torrieri_lambda(const double Pstar[6], double Lambda[9
 
 // Exact Skyrme + Lorentzian Momentum-Dependent potential energy density V_pot(r) [GeV/fm^3]
 // entering T^00 (matching MeanFieldGrid::compute_potential_energy_test_gev identically!)
-inline double eval_skyrme_md_t00_pot_density(double rho_b_lab, double delta, double psi_md_val,
-                                             const MeanFieldConfig& mf_cfg) {
+HD_INLINE double eval_skyrme_md_t00_pot_density(double rho_b_lab, double delta, double psi_md_val,
+                                                const MeanFieldConfig& mf_cfg) {
     if (!mf_cfg.enabled || rho_b_lab <= 1.0e-12) return 0.0;
     const double u = rho_b_lab / mf_cfg.rho0_fm3;
     return 0.5 * mf_cfg.A_sk_gev * mf_cfg.rho0_fm3 * u * u +
-           (mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.sigma_exp + 1.0) +
-           mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * std::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
+           (mf_cfg.B_sk_gev / (mf_cfg.sigma_exp + 1.0)) * mf_cfg.rho0_fm3 * ::pow(u, mf_cfg.sigma_exp + 1.0) +
+           mf_cfg.S_pot_gev * mf_cfg.rho0_fm3 * ::pow(u, mf_cfg.gamma_sym + 1.0) * delta * delta +
            0.5 * mf_cfg.C_md_gev * rho_b_lab * psi_md_val;
 }
+
+#if TRANSPORT_HAS_CUDA
+// 20 raw CIC fields packed contiguously as [20][nc]:
+//   0..9: t00, t0x, t0y, t0z, txx, txy, txz, tyy, tyz, tzz
+//   10..11: rp, rn | 12..15: jb0, jbx, jby, jbz | 16..19: jq0, jqx, jqy, jqz
+template <int = 0>
+__global__ void deposit_hcgf_cic_kernel(ParticleSoAView p, GridConfig gcfg, int nc,
+                                        float inv_n_dV, bool exclude_frozen,
+                                        float* d_raw, int* d_has_frozen) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= p.n || !p.active[i]) return;
+    if (p.freezeout_tag[i] != 0) {
+        if (d_has_frozen && *d_has_frozen == 0) *d_has_frozen = 1;
+        if (exclude_frozen) return;
+    }
+    const int sp_id = p.species[i];
+    const SpeciesInfo sp = get_species_info(sp_id);
+    if (sp.baryon_num <= 0) return;
+
+    int i0, j0, k0;
+    double fx_d, fy_d, fz_d;
+    if (!mf_detail::cic_weights(p.x[i], p.y[i], p.z[i], gcfg, i0, j0, k0, fx_d, fy_d, fz_d)) return;
+
+    const float fx = static_cast<float>(fx_d), fy = static_cast<float>(fy_d), fz = static_cast<float>(fz_d);
+    const float inv_fo = (p.freezeout_tag[i] > 1) ? (1.0f / static_cast<float>(p.freezeout_tag[i])) : 1.0f;
+    const float w_scale = inv_n_dV * inv_fo;
+    const float E = static_cast<float>(p.E[i]);
+    const float px = static_cast<float>(p.px[i]);
+    const float py = static_cast<float>(p.py[i]);
+    const float pz = static_cast<float>(p.pz[i]);
+    const float inv_E = 1.0f / E;
+    const float vx = px * inv_E, vy = py * inv_E, vz = pz * inv_E;
+    const float B = static_cast<float>(sp.baryon_num);
+    const float Q = static_cast<float>(sp.charge);
+    double wp_d = 0.0, wn_d = 0.0;
+    get_effective_pn_weights(sp_id, wp_d, wn_d);
+    const float vals[20] = {
+        E, px, py, pz,
+        px * vx, px * vy, px * vz, py * vy, py * vz, pz * vz,
+        static_cast<float>(wp_d), static_cast<float>(wn_d),
+        B, B * vx, B * vy, B * vz,
+        Q, Q * vx, Q * vy, Q * vz
+    };
+
+    for (int dz = 0; dz <= 1; ++dz) {
+        const int iz = mf_detail::wrap_or_clamp_idx(k0 + dz, gcfg.nz, gcfg.boundary);
+        const float wz = (dz == 0) ? (1.0f - fz) : fz;
+        for (int dy = 0; dy <= 1; ++dy) {
+            const int iy = mf_detail::wrap_or_clamp_idx(j0 + dy, gcfg.ny, gcfg.boundary);
+            const float wy = (dy == 0) ? (1.0f - fy) : fy;
+            for (int dx = 0; dx <= 1; ++dx) {
+                const int ix = mf_detail::wrap_or_clamp_idx(i0 + dx, gcfg.nx, gcfg.boundary);
+                const float w = (((dx == 0) ? (1.0f - fx) : fx) * wy * wz) * w_scale;
+                const int c = mf_detail::cell_flat(ix, iy, iz, gcfg);
+                for (int f = 0; f < 20; ++f) {
+                    atomicAdd(&d_raw[f * nc + c], w * vals[f]);
+                }
+            }
+        }
+    }
+}
+
+template <int = 0>
+__global__ void smooth_hcgf_batch_kernel(const float* __restrict__ src, float* __restrict__ dst,
+                                         int nc, int n_fields, int axis, GridConfig gcfg) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= nc * n_fields) return;
+    const int f = idx / nc;
+    const int c = idx - f * nc;
+    mf_detail::smooth_axis_cell(src + f * nc, dst + f * nc, c, axis, gcfg);
+}
+
+template <int = 0>
+__global__ void deposit_hcgf_psi_kernel(ParticleSoAView p, GridConfig gcfg, int nc,
+                                        float inv_n_dV_rho0, float inv_lam2, bool exclude_frozen,
+                                        const float* __restrict__ d_raw, float* d_psi) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= p.n || !p.active[i]) return;
+    if (exclude_frozen && p.freezeout_tag[i] != 0) return;
+    const SpeciesInfo sp = get_species_info(p.species[i]);
+    if (sp.baryon_num <= 0) return;
+
+    int i0, j0, k0;
+    double fx_d, fy_d, fz_d;
+    if (!mf_detail::cic_weights(p.x[i], p.y[i], p.z[i], gcfg, i0, j0, k0, fx_d, fy_d, fz_d)) return;
+    const float fx = static_cast<float>(fx_d), fy = static_cast<float>(fy_d), fz = static_cast<float>(fz_d);
+
+    const float* rp  = d_raw + 10 * nc;
+    const float* rn  = d_raw + 11 * nc;
+    const float* t0x = d_raw + 1 * nc;
+    const float* t0y = d_raw + 2 * nc;
+    const float* t0z = d_raw + 3 * nc;
+
+    float r_tot = 0.0f, pfx = 0.0f, pfy = 0.0f, pfz = 0.0f;
+    for (int dz = 0; dz <= 1; ++dz) {
+        const int iz = mf_detail::wrap_or_clamp_idx(k0 + dz, gcfg.nz, gcfg.boundary);
+        const float wz = (dz == 0) ? (1.0f - fz) : fz;
+        for (int dy = 0; dy <= 1; ++dy) {
+            const int iy = mf_detail::wrap_or_clamp_idx(j0 + dy, gcfg.ny, gcfg.boundary);
+            const float wy = (dy == 0) ? (1.0f - fy) : fy;
+            for (int dx = 0; dx <= 1; ++dx) {
+                const int ix = mf_detail::wrap_or_clamp_idx(i0 + dx, gcfg.nx, gcfg.boundary);
+                const float w = ((dx == 0) ? (1.0f - fx) : fx) * wy * wz;
+                const int c = mf_detail::cell_flat(ix, iy, iz, gcfg);
+                r_tot += w * (rp[c] + rn[c]);
+                pfx += w * t0x[c]; pfy += w * t0y[c]; pfz += w * t0z[c];
+            }
+        }
+    }
+    if (r_tot > 1.0e-10f) { const float ir = 1.0f / r_tot; pfx *= ir; pfy *= ir; pfz *= ir; }
+    const float inv_fo = (p.freezeout_tag[i] > 1) ? (1.0f / static_cast<float>(p.freezeout_tag[i])) : 1.0f;
+    const float inv_A = 1.0f / static_cast<float>(sp.baryon_num);
+    const float qx = static_cast<float>(p.px[i]) * inv_A - pfx;
+    const float qy = static_cast<float>(p.py[i]) * inv_A - pfy;
+    const float qz = static_cast<float>(p.pz[i]) * inv_A - pfz;
+    const float contrib = (static_cast<float>(sp.baryon_num) * inv_n_dV_rho0 * inv_fo) /
+                          (1.0f + (qx * qx + qy * qy + qz * qz) * inv_lam2);
+    for (int dz = 0; dz <= 1; ++dz) {
+        const int iz = mf_detail::wrap_or_clamp_idx(k0 + dz, gcfg.nz, gcfg.boundary);
+        const float wz = (dz == 0) ? (1.0f - fz) : fz;
+        for (int dy = 0; dy <= 1; ++dy) {
+            const int iy = mf_detail::wrap_or_clamp_idx(j0 + dy, gcfg.ny, gcfg.boundary);
+            const float wy = (dy == 0) ? (1.0f - fy) : fy;
+            for (int dx = 0; dx <= 1; ++dx) {
+                const int ix = mf_detail::wrap_or_clamp_idx(i0 + dx, gcfg.nx, gcfg.boundary);
+                const float w = ((dx == 0) ? (1.0f - fx) : fx) * wy * wz;
+                atomicAdd(&d_psi[mf_detail::cell_flat(ix, iy, iz, gcfg)], w * contrib);
+            }
+        }
+    }
+}
+
+template <int = 0>
+__global__ void finalize_hcgf_eckart_kernel(const float* __restrict__ d_raw,
+                                            const float* __restrict__ d_psi,
+                                            float* __restrict__ d_out,
+                                            int nc, MeanFieldConfig mf_cfg) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nc) return;
+
+    const double t00 = d_raw[0 * nc + c], t0x = d_raw[1 * nc + c], t0y = d_raw[2 * nc + c], t0z = d_raw[3 * nc + c];
+    const double txx = d_raw[4 * nc + c], txy = d_raw[5 * nc + c], txz = d_raw[6 * nc + c];
+    const double tyy = d_raw[7 * nc + c], tyz = d_raw[8 * nc + c], tzz = d_raw[9 * nc + c];
+    const double rp  = d_raw[10 * nc + c], rn = d_raw[11 * nc + c];
+    const double jb0 = d_raw[12 * nc + c], jbx = d_raw[13 * nc + c], jby = d_raw[14 * nc + c], jbz = d_raw[15 * nc + c];
+    const double jq0 = d_raw[16 * nc + c], jqx = d_raw[17 * nc + c], jqy = d_raw[18 * nc + c], jqz = d_raw[19 * nc + c];
+
+    double T00 = t00;
+    const double rb_eff = rp + rn;
+    if (mf_cfg.enabled && rb_eff > 1.0e-12) {
+        const double delta = (rn - rp) / rb_eff;
+        const double v_pot = eval_skyrme_md_t00_pot_density(rb_eff, delta, d_psi ? d_psi[c] : 0.0, mf_cfg);
+        T00 = (T00 + v_pot > 1.0e-12) ? (T00 + v_pot) : 1.0e-12;
+    }
+
+    double nb_e = 0.0, eps_e = 0.0, P_e = 0.0, vx_e = 0.0, vy_e = 0.0, vz_e = 0.0;
+    eval_eckart_frame(jb0, jbx, jby, jbz,
+                      T00, t0x, t0y, t0z, txx, txy, txz, tyy, tyz, tzz,
+                      nb_e, eps_e, P_e, vx_e, vy_e, vz_e);
+
+    double pkin_star[6] = {};
+    if (nb_e > 1.0e-12) {
+        project_stress_to_rest_frame(vx_e, vy_e, vz_e,
+                                     t00, t0x, t0y, t0z, txx, txy, txz, tyy, tyz, tzz, pkin_star);
+    }
+
+    const double vals[24] = {
+        T00, t0x, t0y, t0z, txx, txy, txz, tyy, tyz, tzz,
+        jb0, jbx, jby, jbz, jq0, jqx, jqy, jqz,
+        eps_e, P_e, nb_e, vx_e, vy_e, vz_e
+    };
+    for (int f = 0; f < 24; ++f) d_out[f * nc + c] = static_cast<float>(vals[f]);
+    for (int s = 0; s < 6; ++s)  d_out[(24 + s) * nc + c] = static_cast<float>(pkin_star[s]);
+}
+#endif
 
 }  // namespace hcgf_detail
 
@@ -208,7 +385,10 @@ inline HcgfGridSnapshot compute_hcgf_tmunu_snapshot(int n_test,
     std::vector<double> tmp(nc, 0.0);
 
     for (const auto& hp : host_p) {
-        if (exclude_frozen && hp.freezeout_tag != 0) continue;
+        if (hp.freezeout_tag != 0) {
+            snap.has_frozen_particles = true;
+            if (exclude_frozen) continue;
+        }
         const SpeciesInfo sp = get_species_info(hp.species);
         if (sp.baryon_num <= 0) continue;  // Coarse-grain ONLY baryons (exclude B=0 pions!)
 
@@ -360,5 +540,109 @@ inline void write_hcgf_tmunu_binary(const std::string& tmunu_dir, int idx, int s
                   static_cast<std::streamsize>(nc * sizeof(float)));
     }
 }
+
+// Reusable zero-allocation GPU HCGF T^munu + Eckart frame workspace (eliminates per-step host CIC & D2H!)
+class HcgfGpuWorkspace {
+public:
+    const HcgfGridSnapshot& compute(ParticleSystem& particles,
+                                    int n_test,
+                                    const GridConfig& gcfg,
+                                    const MeanFieldConfig& mf_cfg,
+                                    bool exclude_frozen,
+                                    bool full_24_fields) {
+#if TRANSPORT_HAS_CUDA
+        const int nc = gcfg.num_cells();
+        if (nc <= 0) return snap_;
+        if (d_raw_.size() != static_cast<std::size_t>(20 * nc)) {
+            d_raw_.resize(static_cast<std::size_t>(20 * nc));
+            d_tmp_.resize(static_cast<std::size_t>(20 * nc));
+            d_psi_.resize(static_cast<std::size_t>(nc));
+            d_out_.resize(static_cast<std::size_t>(30 * nc));
+            d_has_frozen_.resize(1);
+        }
+        for (int f = 0; f < 24; ++f) {
+            if (full_24_fields || f == 10 || f == 14 || f == 18 || f >= 20) {
+                snap_.fields[f].resize(static_cast<std::size_t>(nc));
+            }
+        }
+        for (int s = 0; s < 6; ++s) snap_.pkin_eckart[s].resize(static_cast<std::size_t>(nc));
+
+        d_raw_.zero();
+        d_has_frozen_.zero();
+        snap_.has_frozen_particles = false;
+        const int np = particles.slot_size();
+        constexpr int TPB = 256;
+        const float inv_n_dV = static_cast<float>(1.0 / (static_cast<double>(n_test) * gcfg.cell_volume_fm3()));
+
+        if (np > 0) {
+            const ParticleSoAView pv = particles.view();
+            const int p_blocks = (np + TPB - 1) / TPB;
+            hcgf_detail::deposit_hcgf_cic_kernel<<<p_blocks, TPB>>>(
+                pv, gcfg, nc, inv_n_dV, exclude_frozen, d_raw_.data(), d_has_frozen_.data());
+            CUDA_CHECK(cudaGetLastError());
+
+            const int b20 = (20 * nc + TPB - 1) / TPB;
+            hcgf_detail::smooth_hcgf_batch_kernel<<<b20, TPB>>>(d_raw_.data(), d_tmp_.data(), nc, 20, 0, gcfg);
+            hcgf_detail::smooth_hcgf_batch_kernel<<<b20, TPB>>>(d_tmp_.data(), d_raw_.data(), nc, 20, 1, gcfg);
+            hcgf_detail::smooth_hcgf_batch_kernel<<<b20, TPB>>>(d_raw_.data(), d_tmp_.data(), nc, 20, 2, gcfg);
+            CUDA_CHECK(cudaGetLastError());
+            // Smoothed 20 fields now reside in d_tmp_!
+
+            const bool use_md = mf_cfg.enabled && (std::fabs(mf_cfg.C_md_gev) > 1.0e-12);
+            if (use_md) {
+                d_psi_.zero();
+                const float inv_n_dV_rho0 = inv_n_dV / static_cast<float>(mf_cfg.rho0_fm3);
+                const float inv_lam2 = static_cast<float>(1.0 / (mf_cfg.Lambda_md_gev * mf_cfg.Lambda_md_gev));
+                hcgf_detail::deposit_hcgf_psi_kernel<<<p_blocks, TPB>>>(
+                    pv, gcfg, nc, inv_n_dV_rho0, inv_lam2, exclude_frozen, d_tmp_.data(), d_psi_.data());
+                const int b1 = (nc + TPB - 1) / TPB;
+                // Reuse d_raw_[0..nc-1] as scratch for 3-axis smoothing of d_psi_
+                hcgf_detail::smooth_hcgf_batch_kernel<<<b1, TPB>>>(d_psi_.data(), d_raw_.data(), nc, 1, 0, gcfg);
+                hcgf_detail::smooth_hcgf_batch_kernel<<<b1, TPB>>>(d_raw_.data(), d_psi_.data(), nc, 1, 1, gcfg);
+                hcgf_detail::smooth_hcgf_batch_kernel<<<b1, TPB>>>(d_psi_.data(), d_raw_.data(), nc, 1, 2, gcfg);
+                CUDA_CHECK(cudaGetLastError());
+            }
+
+            const int c_blocks = (nc + TPB - 1) / TPB;
+            hcgf_detail::finalize_hcgf_eckart_kernel<<<c_blocks, TPB>>>(
+                d_tmp_.data(), use_md ? d_raw_.data() : nullptr, d_out_.data(), nc, mf_cfg);
+            CUDA_CHECK(cudaGetLastError());
+        } else {
+            d_out_.zero();
+        }
+
+        const std::size_t bytes = static_cast<std::size_t>(nc) * sizeof(float);
+        if (full_24_fields) {
+            for (int f = 0; f < 24; ++f) {
+                CUDA_CHECK(cudaMemcpy(snap_.fields[f].data(), d_out_.data() + f * nc, bytes, cudaMemcpyDeviceToHost));
+            }
+        } else {
+            constexpr int NEEDED[7] = {10, 14, 18, 20, 21, 22, 23};
+            for (int f : NEEDED) {
+                CUDA_CHECK(cudaMemcpy(snap_.fields[f].data(), d_out_.data() + f * nc, bytes, cudaMemcpyDeviceToHost));
+            }
+        }
+        for (int s = 0; s < 6; ++s) {
+            CUDA_CHECK(cudaMemcpy(snap_.pkin_eckart[s].data(), d_out_.data() + (24 + s) * nc, bytes, cudaMemcpyDeviceToHost));
+        }
+        int h_fr = 0;
+        d_has_frozen_.copy_to_host(&h_fr, 1);
+        snap_.has_frozen_particles = (h_fr != 0);
+        return snap_;
+#else
+        (void)full_24_fields;
+        const auto host_p = particles.download();
+        snap_ = compute_hcgf_tmunu_snapshot(n_test, gcfg, mf_cfg, host_p, exclude_frozen);
+        return snap_;
+#endif
+    }
+
+private:
+    HcgfGridSnapshot snap_;
+#if TRANSPORT_HAS_CUDA
+    DeviceBuffer<float> d_raw_, d_tmp_, d_psi_, d_out_;
+    DeviceBuffer<int> d_has_frozen_;
+#endif
+};
 
 }  // namespace transport

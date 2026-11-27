@@ -334,6 +334,12 @@ public:
         return out;
     }
 
+    void swap(DeviceBuffer& other) noexcept {
+        T* tp = ptr_; ptr_ = other.ptr_; other.ptr_ = tp;
+        std::size_t ts = size_; size_ = other.size_; other.size_ = ts;
+        std::size_t tc = capacity_; capacity_ = other.capacity_; other.capacity_ = tc;
+    }
+
     T* data() { return ptr_; }
     const T* data() const { return ptr_; }
     std::size_t size() const { return size_; }

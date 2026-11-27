@@ -233,7 +233,7 @@ void dump_eos_curves(const std::string& path) {
 
 void print_species_catalog(const CrossSectionConfig& xs_cfg) {
     const SpectralNormTable norms = compute_spectral_norm_table();
-    std::printf("\n=== Nucleon & Light-Cluster Species Catalog (A <= 4, Breit-Wigner Spectral Enabled) ===\n");
+    std::printf("\n=== Hadron & Light-Cluster Species Catalog (58 Species, A <= 6, Breit-Wigner Spectral Enabled) ===\n");
     std::printf("%-3s %-13s %2s %2s %5s %2s %10s %10s %8s %7s %9s\n",
                 "ID", "Name", "A", "Z", "J^P", "g", "Pole[GeV]", "m_th[GeV]",
                 "Gam[MeV]", "N_raw", "sig_pX[mb]");
@@ -293,8 +293,11 @@ void print_usage(const char* prog) {
         "  --freezeout-tmin <float>           Min time before n<nfr check [fm/c] (<0: auto overlap time)\n"
         "  --freezeout-cells-csv <path>       Write HCGF n<nfr freeze-out hypersurface cells to CSV\n"
         "  --reactions <all|elastic>          Enable full inelastic+BW network or elastic only\n"
-        "  --eos <none|skyrme-soft|md-soft|md-stiff>\n"
+        "  --eos <none|skyrme-soft|md-soft|md-stiff|sm|hm>\n"
         "                                     Mean-field EOS + MD potential (default: none)\n"
+        "  --pauli <on|off>                   6D phase-space Pauli blocking (default: auto ON in hic)\n"
+        "  --coulomb <on|off>                 3D Poisson Coulomb interaction (default: auto ON in hic)\n"
+        "  --anisotropy <on|off>              Pratt-Torrieri det(Lambda)=1 momentum anisotropy (default: on)\n"
         "  --in-medium-ec <off|on|exact>      MD energy conservation: per-vertex (on) or +projection (exact)\n"
         "  --inelastic-scale <float>          Scale factor on 2<->2 inelastic couplings (default: 1.0)\n"
         "  --npart <int>                      Initial test particles (default: 32000)\n"
@@ -319,7 +322,8 @@ void print_usage(const char* prog) {
         "  --dump-xs <csv_path>               Export elastic cross-section curves and exit\n"
         "  --dump-bw <csv_path>               Export Breit-Wigner spectral curves and exit\n"
         "  --dump-eos <csv_path>              Export Skyrme + MD EOS & optical potential curves\n"
-        "  --print-species                    Print full 28-species catalog and exit\n"
+        "  --seed <uint64>                    Philox PRNG master seed (default: 20261124)\n"
+        "  --print-species                    Print full 58-species catalog and exit\n"
         "  --help                             Show this help message\n",
         prog);
 }
@@ -722,7 +726,8 @@ int main(int argc, char** argv) {
                                  ((step % freezeout_every == 0 && t_now >= fo_warmup_t) || step == n_steps);
         if (do_fo_check || do_tmunu) {
             const HcgfGridSnapshot tmunu_snap = fo_clusterizer.process_step(
-                particles, step, t_now, n_test, mf_cfg, step_cfg.seed, /*force_finalize=*/(step == n_steps));
+                particles, step, t_now, n_test, mf_cfg, step_cfg.seed,
+                /*force_finalize=*/(step == n_steps), /*full_tmunu=*/do_tmunu);
             if (do_tmunu) {
                 write_hcgf_tmunu_binary(dump_tmunu_dir, tmunu_idx++, step, t_now, gcfg, tmunu_snap);
             }

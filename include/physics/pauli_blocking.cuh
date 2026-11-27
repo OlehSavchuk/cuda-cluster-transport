@@ -64,28 +64,32 @@ HD_INLINE double eval_pauli_f(const PauliPhaseSpaceView& pv,
 namespace pauli_detail {
 
 HD_INLINE void deposit_nucleon_6d_cic(float* tbl, const PauliGridConfig& cfg,
-                                               double x, double y, double z,
-                                               double px, double py, double pz, float weight_norm) {
+                                               float x, float y, float z,
+                                               float px, float py, float pz, float weight_norm) {
     const int nr = cfg.nr, np = cfg.np;
-    const double rx = (x + cfg.r_half_fm) / cfg.dr() - 0.5;
-    const double ry = (y + cfg.r_half_fm) / cfg.dr() - 0.5;
-    const double rz = (z + cfg.r_half_fm) / cfg.dr() - 0.5;
-    const double qx = (px + cfg.p_half_gev) / cfg.dp() - 0.5;
-    const double qy = (py + cfg.p_half_gev) / cfg.dp() - 0.5;
-    const double qz = (pz + cfg.p_half_gev) / cfg.dp() - 0.5;
+    const float inv_dr = static_cast<float>(cfg.nr) / static_cast<float>(2.0 * cfg.r_half_fm);
+    const float inv_dp = static_cast<float>(cfg.np) / static_cast<float>(2.0 * cfg.p_half_gev);
+    const float r_half = static_cast<float>(cfg.r_half_fm);
+    const float p_half = static_cast<float>(cfg.p_half_gev);
+    const float rx = (x + r_half) * inv_dr - 0.5f;
+    const float ry = (y + r_half) * inv_dr - 0.5f;
+    const float rz = (z + r_half) * inv_dr - 0.5f;
+    const float qx = (px + p_half) * inv_dp - 0.5f;
+    const float qy = (py + p_half) * inv_dp - 0.5f;
+    const float qz = (pz + p_half) * inv_dp - 0.5f;
 
-    const int ir0 = static_cast<int>(::floor(rx)), jr0 = static_cast<int>(::floor(ry)), kr0 = static_cast<int>(::floor(rz));
-    const int ip0 = static_cast<int>(::floor(qx)), jp0 = static_cast<int>(::floor(qy)), kp0 = static_cast<int>(::floor(qz));
+    const int ir0 = static_cast<int>(std::floor(rx)), jr0 = static_cast<int>(std::floor(ry)), kr0 = static_cast<int>(std::floor(rz));
+    const int ip0 = static_cast<int>(std::floor(qx)), jp0 = static_cast<int>(std::floor(qy)), kp0 = static_cast<int>(std::floor(qz));
     if (ir0 < -1 || ir0 >= nr || jr0 < -1 || jr0 >= nr || kr0 < -1 || kr0 >= nr ||
         ip0 < -1 || ip0 >= np || jp0 < -1 || jp0 >= np || kp0 < -1 || kp0 >= np) {
         return;
     }
-    const float frx[2] = {static_cast<float>(1.0 - (rx - ir0)), static_cast<float>(rx - ir0)};
-    const float fry[2] = {static_cast<float>(1.0 - (ry - jr0)), static_cast<float>(ry - jr0)};
-    const float frz[2] = {static_cast<float>(1.0 - (rz - kr0)), static_cast<float>(rz - kr0)};
-    const float fpx[2] = {static_cast<float>(1.0 - (qx - ip0)), static_cast<float>(qx - ip0)};
-    const float fpy[2] = {static_cast<float>(1.0 - (qy - jp0)), static_cast<float>(qy - jp0)};
-    const float fpz[2] = {static_cast<float>(1.0 - (qz - kp0)), static_cast<float>(qz - kp0)};
+    const float frx[2] = {1.0f - (rx - ir0), rx - ir0};
+    const float fry[2] = {1.0f - (ry - jr0), ry - jr0};
+    const float frz[2] = {1.0f - (rz - kr0), rz - kr0};
+    const float fpx[2] = {1.0f - (qx - ip0), qx - ip0};
+    const float fpy[2] = {1.0f - (qy - jp0), qy - jp0};
+    const float fpz[2] = {1.0f - (qz - kp0), qz - kp0};
     const int np3 = np * np * np;
 
     for (int dz = 0; dz < 2; ++dz) {
@@ -119,15 +123,20 @@ HD_INLINE void deposit_nucleon_6d_cic(float* tbl, const PauliGridConfig& cfg,
 }
 
 #if TRANSPORT_HAS_CUDA
-__global__ inline void deposit_pauli_6d_kernel(ParticleSoAView p, int n_slots, PauliGridConfig cfg,
-                                               float norm, float* d_fp, float* d_fn) {
+template <int = 0>
+__global__ void deposit_pauli_6d_kernel(ParticleSoAView p, int n_slots, PauliGridConfig cfg,
+                                        float norm, float* d_fp, float* d_fn) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_slots || !p.active[i] || p.freezeout_tag[i] != 0) return;
     const int id = p.species[i];
     if (id == PROTON) {
-        deposit_nucleon_6d_cic(d_fp, cfg, p.x[i], p.y[i], p.z[i], p.px[i], p.py[i], p.pz[i], norm);
+        deposit_nucleon_6d_cic(d_fp, cfg, static_cast<float>(p.x[i]), static_cast<float>(p.y[i]),
+                               static_cast<float>(p.z[i]), static_cast<float>(p.px[i]),
+                               static_cast<float>(p.py[i]), static_cast<float>(p.pz[i]), norm);
     } else if (id == NEUTRON) {
-        deposit_nucleon_6d_cic(d_fn, cfg, p.x[i], p.y[i], p.z[i], p.px[i], p.py[i], p.pz[i], norm);
+        deposit_nucleon_6d_cic(d_fn, cfg, static_cast<float>(p.x[i]), static_cast<float>(p.y[i]),
+                               static_cast<float>(p.z[i]), static_cast<float>(p.px[i]),
+                               static_cast<float>(p.py[i]), static_cast<float>(p.pz[i]), norm);
     }
 }
 #endif
@@ -205,14 +214,18 @@ public:
                     }
                 }
             }
-            pauli_detail::deposit_nucleon_6d_cic((id == PROTON) ? fp : fn, cfg_,
-                                                 p.x[i], p.y[i], p.z[i], p.px[i], p.py[i], p.pz[i], norm);
+            pauli_detail::deposit_nucleon_6d_cic(
+                (id == PROTON) ? fp : fn, cfg_,
+                static_cast<float>(p.x[i]), static_cast<float>(p.y[i]), static_cast<float>(p.z[i]),
+                static_cast<float>(p.px[i]), static_cast<float>(p.py[i]), static_cast<float>(p.pz[i]), norm);
         }
         for (int b : touched_blocks_) blk_flag_[b] = 0;
 #endif
     }
 
     PauliPhaseSpaceView view() const { return PauliPhaseSpaceView{cfg_, d_fp_.data(), d_fn_.data()}; }
+    std::vector<float> download_fp() const { return d_fp_.to_vector(); }
+    std::vector<float> download_fn() const { return d_fn_.to_vector(); }
     const PauliGridConfig& config() const { return cfg_; }
 
 private:

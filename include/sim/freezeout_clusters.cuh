@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "backend/philox_rng.cuh"
@@ -123,25 +124,75 @@ inline void species_thermal_base(int sp_id, double T_gev, double& phi0_fm3, doub
     k_mean_gev = (i_n > 0.0) ? (i_k / i_n) : (1.5 * T_gev);
 }
 
+// Precomputed 1024-point thermal base LUT over T in [1.4, 166.0] MeV (dT = 0.16 MeV -> <1e-6 interp accuracy!)
+struct ThermalBaseLut {
+    static constexpr int N_T = 1024;
+    static constexpr double T_MIN = 0.0014;
+    static constexpr double T_MAX = 0.1660;
+    double phi0[NUM_SPECIES][N_T] = {};
+    double kmean[NUM_SPECIES][N_T] = {};
+    double bshift[NUM_SPECIES] = {};
+
+    ThermalBaseLut() {
+        const double dT = (T_MAX - T_MIN) / (N_T - 1);
+        for (int id = 0; id < NUM_SPECIES; ++id) {
+            const SpeciesInfo sp = get_species_info(id);
+            if (is_pion(id) || is_delta(id) || sp.baryon_num <= 0) continue;
+            for (int k = 0; k < N_T; ++k) {
+                species_thermal_base(id, T_MIN + k * dT, phi0[id][k], kmean[id][k], bshift[id]);
+            }
+        }
+    }
+
+    inline void eval(int id, double T_gev, double& out_phi0, double& out_kmean, double& out_bshift) const {
+        out_bshift = bshift[id];
+        if (T_gev <= T_MIN || T_gev >= T_MAX) {
+            species_thermal_base(id, T_gev, out_phi0, out_kmean, out_bshift);
+            return;
+        }
+        const double x = (T_gev - T_MIN) * ((N_T - 1) / (T_MAX - T_MIN));
+        const int idx = std::min(N_T - 2, std::max(0, static_cast<int>(x)));
+        const double f = x - idx;
+        out_phi0  = phi0[id][idx]  + f * (phi0[id][idx + 1]  - phi0[id][idx]);
+        out_kmean = kmean[id][idx] + f * (kmean[id][idx + 1] - kmean[id][idx]);
+    }
+};
+
+inline const ThermalBaseLut& get_thermal_base_lut() {
+    static const ThermalBaseLut lut{};
+    return lut;
+}
+
 // Given (T_gev, nB_fm3, Yp), solve 2x2 SPD Newton system for (u_p, u_n) = ((mu_p-m_p)/T, (mu_n-m_n)/T)
 // with Fermi-Dirac (fermions) & Bose-Einstein (bosons) quantum statistics in the INCG EoS!
 inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool inc_exc, int max_A,
                                    double n_out[NUM_SPECIES], double& out_up, double& out_un,
-                                   bool quantum_stats = true) {
+                                   bool quantum_stats = true, bool warm_start = false) {
     const double np_tgt = std::max(1.0e-9, Yp * nB_fm3);
     const double nn_tgt = std::max(1.0e-9, (1.0 - Yp) * nB_fm3);
+    const ThermalBaseLut& lut = get_thermal_base_lut();
 
     double phi0[NUM_SPECIES] = {}, kmean[NUM_SPECIES] = {}, bshift[NUM_SPECIES] = {};
+    int active_ids[NUM_SPECIES];
+    int n_act_sp = 0;
     for (int id = 0; id < NUM_SPECIES; ++id) {
         const SpeciesInfo sp = get_species_info(id);
-        if (is_pion(id) || is_delta(id) || sp.baryon_num > max_A) continue;
+        if (is_pion(id) || is_delta(id) || sp.baryon_num <= 0 || sp.baryon_num > max_A) continue;
         if (sp.is_excited && !inc_exc) continue;
-        species_thermal_base(id, T_gev, phi0[id], kmean[id], bshift[id]);
+        lut.eval(id, T_gev, phi0[id], kmean[id], bshift[id]);
+        if (phi0[id] > 0.0) active_ids[n_act_sp++] = id;
     }
 
-    double up = std::log(np_tgt / std::max(phi0[PROTON], 1.0e-30));
-    double un = std::log(nn_tgt / std::max(phi0[NEUTRON], 1.0e-30));
+    double up = warm_start ? std::clamp(out_up, -150.0, 50.0) : std::log(np_tgt / std::max(phi0[PROTON], 1.0e-30));
+    double un = warm_start ? std::clamp(out_un, -150.0, 50.0) : std::log(nn_tgt / std::max(phi0[NEUTRON], 1.0e-30));
     const int n_qterms = quantum_stats ? 6 : 1;
+    static constexpr double INV_Q15[7] = {0.0, 1.0, 0.35355339059327379, 0.19245008972987526,
+                                          0.125, 0.089442719099991588, 0.068041381743977170};
+    static constexpr double INV_Q05[7] = {0.0, 1.0, 0.70710678118654752, 0.57735026918962576,
+                                          0.5, 0.44721359549995794, 0.40824829046386302};
+    static constexpr double INV_Q25[7] = {0.0, 1.0, 0.17677669529663689, 0.064150029909958421,
+                                          0.03125, 0.017888543819998318, 0.011340230290662862};
+    const double inv_T = 1.0 / T_gev;
 
     auto eval_species = [&](int id, double u_p, double u_n, double& na, double& dna_deta, double& e_tot_a) {
         const SpeciesInfo sp = get_species_info(id);
@@ -154,16 +205,22 @@ inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool 
         }
         const double Z = sp.charge, N = sp.baryon_num - sp.charge;
         const bool is_boson = (sp.baryon_num % 2 == 0);
-        double eta = Z * u_p + N * u_n - bshift[id] / T_gev;
+        double eta = Z * u_p + N * u_n - bshift[id] * inv_T;
         eta = std::clamp(eta, -200.0, is_boson ? -0.012 : 60.0);
-        double s_n = 0.0, s_dn = 0.0, s_k = 0.0;
+        const double z1 = std::exp(eta);
+        if (n_qterms == 1 || z1 < 1.0e-5) {
+            na = phi0[id] * z1;
+            dna_deta = na;
+            e_tot_a = na * (bshift[id] + kmean[id]);
+            return;
+        }
+        double s_n = 0.0, s_dn = 0.0, s_k = 0.0, zq = z1;
         for (int q = 1; q <= n_qterms; ++q) {
-            const double sgn = (!is_boson && (q % 2 == 0)) ? -1.0 : 1.0;
-            const double ez = sgn * std::exp(q * eta);
-            const double q_half = std::sqrt(static_cast<double>(q));
-            s_n  += ez / (q * q_half);
-            s_dn += ez / q_half;
-            s_k  += ez / (q * q * q_half);
+            const double ez = ((!is_boson && (q % 2 == 0)) ? -1.0 : 1.0) * zq;
+            s_n  += ez * INV_Q15[q];
+            s_dn += ez * INV_Q05[q];
+            s_k  += ez * INV_Q25[q];
+            zq *= z1;
         }
         na = std::max(0.0, phi0[id] * s_n);
         dna_deta = std::max(0.0, phi0[id] * s_dn);
@@ -172,8 +229,8 @@ inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool 
 
     for (int it = 0; it < 20; ++it) {
         double fp = -np_tgt, fn = -nn_tgt, jpp = 1.0e-30, jpn = 0.0, jnn = 1.0e-30;
-        for (int id = 0; id < NUM_SPECIES; ++id) {
-            if (phi0[id] <= 0.0) continue;
+        for (int k = 0; k < n_act_sp; ++k) {
+            const int id = active_ids[k];
             const SpeciesInfo sp = get_species_info(id);
             const double Z = sp.charge, N = sp.baryon_num - sp.charge;
             double na = 0.0, dnd = 0.0, ea = 0.0;
@@ -181,16 +238,17 @@ inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool 
             fp += Z * na; fn += N * na;
             jpp += Z * Z * dnd; jpn += Z * N * dnd; jnn += N * N * dnd;
         }
-        if (std::fabs(fp) + std::fabs(fn) < 1.0e-12 * nB_fm3) break;
+        if (std::fabs(fp) + std::fabs(fn) < 1.0e-11 * nB_fm3) break;
         const double det = jpp * jnn - jpn * jpn;
         if (det <= 1.0e-60) break;
         up -= std::clamp(( jnn * fp - jpn * fn) / det, -1.8, 1.8);
         un -= std::clamp((-jpn * fp + jpp * fn) / det, -1.8, 1.8);
     }
     out_up = up; out_un = un;
+    for (int id = 0; id < NUM_SPECIES; ++id) n_out[id] = 0.0;
     double e_sum = 0.0;
-    for (int id = 0; id < NUM_SPECIES; ++id) {
-        if (phi0[id] <= 0.0) { n_out[id] = 0.0; continue; }
+    for (int k = 0; k < n_act_sp; ++k) {
+        const int id = active_ids[k];
         double dnd = 0.0, ea = 0.0;
         eval_species(id, up, un, n_out[id], dnd, ea);
         e_sum += ea;
@@ -207,18 +265,50 @@ inline void invert_local_cluster_eos(double nB_fm3, double Yp, double e_th_gev, 
                                      double n_eq[NUM_SPECIES], bool quantum_stats = true) {
     double T_lo = 0.0015, T_hi = 0.165;
     double up = 0.0, un = 0.0;
-    const double e_lo = solve_hrg_fugacities(T_lo, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
-    if (e_th_gev <= e_lo) {
+    double f_lo = solve_hrg_fugacities(T_lo, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats, false) - e_th_gev;
+    if (f_lo >= 0.0) {
         T_gev = T_lo;
     } else {
-        for (int b = 0; b < 24; ++b) {
-            const double T_mid = 0.5 * (T_lo + T_hi);
-            const double e_mid = solve_hrg_fugacities(T_mid, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
-            if (e_mid < e_th_gev) T_lo = T_mid;
-            else T_hi = T_mid;
+        double up_hi = up, un_hi = un;
+        double f_hi = solve_hrg_fugacities(T_hi, nB_fm3, Yp, inc_exc, max_A, n_eq, up_hi, un_hi, quantum_stats, false) - e_th_gev;
+        if (f_hi <= 0.0) {
+            T_gev = T_hi;
+            up = up_hi; un = un_hi;
+        } else {
+            // Illinois-damped Secant + periodic midpoint bisection on strictly monotonic e_hrg(T) (~6-8 evals!)
+            double T_cur = std::clamp(0.67 * std::max(0.003, e_th_gev + 0.012), T_lo + 1.0e-4, T_hi - 1.0e-4);
+            int prev_side = 0;
+            for (int b = 0; b < 24; ++b) {
+                if (T_hi - T_lo < 5.0e-7) break;
+                const double f_cur = solve_hrg_fugacities(
+                    T_cur, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats, false) - e_th_gev;
+                if (std::fabs(f_cur) < 5.0e-8) {
+                    T_lo = T_hi = T_cur;
+                    break;
+                }
+                if (f_cur < 0.0) {
+                    T_lo = T_cur; f_lo = f_cur;
+                    if (prev_side == -1) f_hi *= 0.5;
+                    prev_side = -1;
+                } else {
+                    T_hi = T_cur; f_hi = f_cur;
+                    if (prev_side == +1) f_lo *= 0.5;
+                    prev_side = +1;
+                }
+                if (b % 4 == 3) {
+                    T_cur = 0.5 * (T_lo + T_hi);
+                } else {
+                    const double pad = 0.05 * (T_hi - T_lo);
+                    const double denom = f_hi - f_lo;
+                    const double T_sec = (std::fabs(denom) > 1.0e-18)
+                                             ? (T_lo - f_lo * (T_hi - T_lo) / denom)
+                                             : (0.5 * (T_lo + T_hi));
+                    T_cur = (T_sec > T_lo + pad && T_sec < T_hi - pad) ? T_sec : (0.5 * (T_lo + T_hi));
+                }
+            }
+            T_gev = 0.5 * (T_lo + T_hi);
+            solve_hrg_fugacities(T_gev, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats, false);
         }
-        T_gev = 0.5 * (T_lo + T_hi);
-        solve_hrg_fugacities(T_gev, nB_fm3, Yp, inc_exc, max_A, n_eq, up, un, quantum_stats);
     }
     muB_gev = phys::MASS_NEUTRON + T_gev * un;
     muQ_gev = (phys::MASS_PROTON + T_gev * up) - muB_gev;
@@ -324,8 +414,16 @@ public:
     void configure(const FreezeoutConfig& cfg, const GridConfig& gcfg) {
         cfg_ = cfg;
         gcfg_ = gcfg;
-        peak_nb_.assign(gcfg.num_cells(), 0.0);
-        prev_nb_.assign(gcfg.num_cells(), 0.0);
+        const int nc = std::max(0, gcfg.num_cells());
+        peak_nb_.assign(nc, 0.0);
+        prev_nb_.assign(nc, 0.0);
+        dnb_dt_vec_.assign(nc, 0.0);
+        dense_nucleons_.assign(nc, {});
+        back_clusters_.assign(nc, {});
+        cell_baryons_.assign(nc, {});
+        touched_dn_.clear();
+        touched_bc_.clear();
+        touched_cb_.clear();
         prev_t_fm_ = -1.0;
         records_.clear();
         total_baryons_converted_ = 0;
@@ -344,32 +442,53 @@ public:
                                   int n_test,
                                   const MeanFieldConfig& mf_cfg,
                                   std::uint64_t seed,
-                                  bool force_finalize = false) {
-        auto host_p = particles.download();
+                                  bool force_finalize = false,
+                                  bool full_tmunu = false) {
         const bool excl_frozen = (cfg_.mode == ClusterMode::FreezeoutThermal);
-        HcgfGridSnapshot snap = compute_hcgf_tmunu_snapshot(n_test, gcfg_, mf_cfg, host_p, excl_frozen);
         const int nc = gcfg_.num_cells();
-        if (nc <= 0 || cfg_.mode == ClusterMode::Microscopic) return snap;
+        if (nc <= 0) return HcgfGridSnapshot{};
+        if (cfg_.mode == ClusterMode::Microscopic) {
+            return gpu_ws_.compute(particles, n_test, gcfg_, mf_cfg, excl_frozen, /*full_24_fields=*/true);
+        }
+
+        const HcgfGridSnapshot& snap = gpu_ws_.compute(particles, n_test, gcfg_, mf_cfg, excl_frozen, full_tmunu);
 
         const double dt_snap = (prev_t_fm_ >= 0.0 && t_fm > prev_t_fm_) ? (t_fm - prev_t_fm_) : 1.0;
-        std::vector<double> dnb_dt_vec(nc, 0.0);
+        const double n_melt = cfg_.melt_factor * cfg_.n_fr_fm3;
+        bool any_candidate_cell = force_finalize;
         for (int c = 0; c < nc; ++c) {
             const double nb = snap.fields[20][c];
             if (t_fm >= cfg_.peak_track_time_fm && nb > peak_nb_[c]) peak_nb_[c] = nb;
-            dnb_dt_vec[c] = (prev_t_fm_ >= 0.0) ? ((nb - prev_nb_[c]) / dt_snap) : 0.0;
+            const double dnb = (prev_t_fm_ >= 0.0) ? ((nb - prev_nb_[c]) / dt_snap) : 0.0;
+            dnb_dt_vec_[c] = dnb;
             prev_nb_[c] = nb;
+            if (!any_candidate_cell && t_fm >= cfg_.min_time_fm) {
+                const bool post_sep = (t_fm >= 1.35 * cfg_.min_time_fm) && (nb < cfg_.n_fr_fm3) &&
+                                      (dnb <= 0.0) && (snap.fields[10][c] > 0.0f);
+                const bool crossed = ((peak_nb_[c] >= cfg_.n_fr_fm3) && (nb < cfg_.n_fr_fm3) && (dnb <= 0.0)) || post_sep;
+                const bool fo_trig = cfg_.require_peak_crossing ? crossed : (nb < cfg_.n_fr_fm3 && snap.fields[10][c] > 0.0f);
+                const bool melt_trig = snap.has_frozen_particles &&
+                                       (cfg_.backflow != BackflowMode::GhostFreeStream) && (nb > n_melt);
+                if (fo_trig || melt_trig) any_candidate_cell = true;
+            }
         }
         prev_t_fm_ = t_fm;
-        if (!force_finalize && t_fm < cfg_.min_time_fm) return snap;
+        if (!force_finalize && (t_fm < cfg_.min_time_fm || !any_candidate_cell)) return snap;
 
+        auto host_p = particles.download();
         bool mutated = false;
         std::vector<std::uint8_t> remove_mask(host_p.size(), 0);
         std::vector<HostParticle> spawned;
 
+        for (int c : touched_dn_) dense_nucleons_[c].clear();
+        for (int c : touched_bc_) back_clusters_[c].clear();
+        for (int c : touched_cb_) cell_baryons_[c].clear();
+        touched_dn_.clear();
+        touched_bc_.clear();
+        touched_cb_.clear();
+
         // 1. Handle back-emitted freeze-out particles that flew back into dense matter (n_B > n_melt)!
-        const double n_melt = cfg_.melt_factor * cfg_.n_fr_fm3;
-        if (!force_finalize && cfg_.backflow != BackflowMode::GhostFreeStream) {
-            std::vector<std::vector<std::size_t>> dense_nucleons(nc), back_clusters(nc);
+        if (!force_finalize && snap.has_frozen_particles && cfg_.backflow != BackflowMode::GhostFreeStream) {
             PhiloxRng thin_rng(seed ^ 0x7A11C0DEULL, static_cast<std::uint64_t>(step), 0ULL);
             double species_acc[NUM_SPECIES] = {};
             for (int id = 0; id < NUM_SPECIES; ++id) species_acc[id] = thin_rng.uniform();
@@ -405,18 +524,20 @@ public:
                     mutated = true;
                 }
                 if (host_p[i].freezeout_tag == 0 && sp.baryon_num == 1 && !sp.is_excited) {
-                    dense_nucleons[c].push_back(i);
+                    if (dense_nucleons_[c].empty()) touched_dn_.push_back(c);
+                    dense_nucleons_[c].push_back(i);
                 } else if (host_p[i].freezeout_tag != 0 && sp.baryon_num >= 2) {
-                    back_clusters[c].push_back(i);
+                    if (back_clusters_[c].empty()) touched_bc_.push_back(c);
+                    back_clusters_[c].push_back(i);
                 }
             }
 
+            std::sort(touched_bc_.begin(), touched_bc_.end());
             // Mott-dissociate back-emitted clusters (cluster + bath_N -> Z p + N n + bath_N) with exact E, P, B, Q!
-            for (int c = 0; c < nc; ++c) {
-                if (back_clusters[c].empty()) continue;
+            for (int c : touched_bc_) {
                 PhiloxRng mrng(seed ^ 0x4E1700ULL, static_cast<std::uint64_t>(step), static_cast<std::uint64_t>(c));
                 std::size_t partner_cursor = 0;
-                for (std::size_t cl_idx : back_clusters[c]) {
+                for (std::size_t cl_idx : back_clusters_[c]) {
                     if (remove_mask[cl_idx]) continue;
                     const HostParticle& hcl = host_p[cl_idx];
                     const SpeciesInfo spc = get_species_info(hcl.species);
@@ -430,9 +551,9 @@ public:
 
                     double Et = hcl.E, Pxt = hcl.px, Pyt = hcl.py, Pzt = hcl.pz;
                     std::size_t used_partner = static_cast<std::size_t>(-1);
-                    const std::size_t n_dn = dense_nucleons[c].size();
+                    const std::size_t n_dn = dense_nucleons_[c].size();
                     for (std::size_t att = 0; att < n_dn; ++att) {
-                        const std::size_t cand = dense_nucleons[c][(partner_cursor++) % n_dn];
+                        const std::size_t cand = dense_nucleons_[c][(partner_cursor++) % n_dn];
                         if (remove_mask[cand]) continue;
                         const HostParticle& hb = host_p[cand];
                         const double E2 = Et + hb.E, Px2 = Pxt + hb.px, Py2 = Pyt + hb.py, Pz2 = Pzt + hb.pz;
@@ -474,7 +595,6 @@ public:
         }
 
         // 2. Bucket remaining un-frozen baryons (p, n, Delta) by spatial grid cell
-        std::vector<std::vector<std::size_t>> cell_baryons(nc);
         for (std::size_t i = 0; i < host_p.size(); ++i) {
             if (remove_mask[i] || host_p[i].freezeout_tag != 0) continue;
             const SpeciesInfo sp = get_species_info(host_p[i].species);
@@ -483,7 +603,9 @@ public:
             const int iy = static_cast<int>(std::floor((host_p[i].y - gcfg_.ymin) / gcfg_.dy()));
             const int iz = static_cast<int>(std::floor((host_p[i].z - gcfg_.zmin) / gcfg_.dz()));
             if (ix < 0 || ix >= gcfg_.nx || iy < 0 || iy >= gcfg_.ny || iz < 0 || iz >= gcfg_.nz) continue;
-            cell_baryons[mf_detail::cell_flat(ix, iy, iz, gcfg_)].push_back(i);
+            const int c = mf_detail::cell_flat(ix, iy, iz, gcfg_);
+            if (cell_baryons_[c].empty()) touched_cb_.push_back(c);
+            cell_baryons_[c].push_back(i);
         }
 
         struct ReadyMicroCell {
@@ -497,16 +619,24 @@ public:
         };
         std::vector<ReadyMicroCell> ready_cells;
 
-        for (int c = 0; c < nc; ++c) {
-            auto& idxs = cell_baryons[c];
-            if (idxs.empty()) continue;
+        std::sort(touched_cb_.begin(), touched_cb_.end());
+        struct TriggeredCell {
+            int c = 0;
+            bool crossed_downward = false;
+            PhiloxRng rng{0ULL, 0ULL, 0ULL};
+        };
+        std::vector<TriggeredCell> trig_cells;
+        trig_cells.reserve(touched_cb_.size());
+
+        for (int c : touched_cb_) {
+            auto& idxs = cell_baryons_[c];
             const double nb_cell = snap.fields[20][c];
             const bool post_sep_expanding = (t_fm >= 1.35 * cfg_.min_time_fm) &&
                                             (nb_cell < cfg_.n_fr_fm3) &&
-                                            (dnb_dt_vec[c] <= 0.0);
+                                            (dnb_dt_vec_[c] <= 0.0);
             const bool crossed_downward = ((peak_nb_[c] >= cfg_.n_fr_fm3) &&
                                            (nb_cell < cfg_.n_fr_fm3) &&
-                                           (dnb_dt_vec[c] <= 0.0)) || post_sep_expanding;
+                                           (dnb_dt_vec_[c] <= 0.0)) || post_sep_expanding;
             if (!force_finalize && !(cfg_.require_peak_crossing ? crossed_downward : (nb_cell < cfg_.n_fr_fm3))) {
                 continue;
             }
@@ -544,105 +674,165 @@ public:
                 spawned.push_back(hpi);
                 mutated = true;
             }
+            trig_cells.push_back(TriggeredCell{c, crossed_downward, rng});
+        }
 
-            // Compute cell baryon parcel (N_p, N_n, E_c, P_c) and project onto Eckart 4-velocity u^mu
-            int Np = 0, Nn = 0;
-            double Ec = 0.0, Pxc = 0.0, Pyc = 0.0, Pzc = 0.0;
-            double jbx_c = 0.0, jby_c = 0.0, jbz_c = 0.0;
-            for (std::size_t idx : idxs) {
-                const HostParticle& hp = host_p[idx];
-                if (hp.species == PROTON) ++Np; else ++Nn;
-                Ec += hp.E; Pxc += hp.px; Pyc += hp.py; Pzc += hp.pz;
-                const double inv_e = 1.0 / hp.E;
-                jbx_c += hp.px * inv_e; jby_c += hp.py * inv_e; jbz_c += hp.pz * inv_e;
-            }
-            const int Bc = Np + Nn;
-            const double P2 = Pxc * Pxc + Pyc * Pyc + Pzc * Pzc;
-            const double m_rest_nuc = Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON;
-
-            // In Grand-Canonical mode on sparse 1-fm^3 cells (Bc < 16), evaluate both rest-frame thermal
-            // energy and cluster boosts in the smooth coarse-grained Eckart fluid frame (eliminates (Bc-1)/Bc bias!)
-            double vx_e = jbx_c / static_cast<double>(Bc);
-            double vy_e = jby_c / static_cast<double>(Bc);
-            double vz_e = jbz_c / static_cast<double>(Bc);
-            if (cfg_.sampling == FreezeoutSampling::GrandCanonical && Bc < 16 && snap.fields[10][c] > 1.0e-5f) {
-                vx_e = snap.fields[21][c];
-                vy_e = snap.fields[22][c];
-                vz_e = snap.fields[23][c];
-            }
-            const double ve2 = std::min(0.9990, vx_e * vx_e + vy_e * vy_e + vz_e * vz_e);
-            const double u0 = 1.0 / std::sqrt(1.0 - ve2);
-            const double ux = u0 * vx_e, uy = u0 * vy_e, uz = u0 * vz_e;
-            const double nb_raw = static_cast<double>(Bc) / (std::max(1, n_test) * gcfg_.cell_volume_fm3() * u0);
-            const double nb_loc = std::clamp(std::max(nb_cell, nb_raw), 0.005, cfg_.n_fr_fm3);
-            // Match INCG EoS directly on the n_B = n_fr freeze-out hypersurface when crossing downward!
-            const double nB_eff = (crossed_downward && !force_finalize) ? cfg_.n_fr_fm3 : nb_loc;
-
-            // Include exact Skyrme + Lorentzian MD potential energy strictly in lab T^00 (Ec_t00 = Ec + E_pot_cell),
-            // then extract Eckart rest-frame energy E_rest = u^0 * Ec_t00 - P_c . u_E!
-            const double delta_c = static_cast<double>(Nn - Np) / static_cast<double>(Bc);
-            double e_pot_cell_gev = 0.0;
-            if (mf_cfg.enabled) {
-                const double rho_b_lab = nB_eff * u0;
-                double md_avg = 0.0;
-                if (std::fabs(mf_cfg.C_md_gev) > 1.0e-12) {
-                    const double pfx = Pxc / Bc, pfy = Pyc / Bc, pfz = Pzc / Bc;
-                    const double inv_lam2 = 1.0 / (mf_cfg.Lambda_md_gev * mf_cfg.Lambda_md_gev);
-                    for (std::size_t idx : idxs) {
-                        const HostParticle& hp = host_p[idx];
-                        const double qx = hp.px - pfx, qy = hp.py - pfy, qz = hp.pz - pfz;
-                        md_avg += 1.0 / (1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2);
-                    }
-                    md_avg /= static_cast<double>(Bc);
-                }
-                const double psi_val = (rho_b_lab / mf_cfg.rho0_fm3) * md_avg;
-                const double v_pot_dens = hcgf_detail::eval_skyrme_md_t00_pot_density(rho_b_lab, delta_c, psi_val, mf_cfg);
-                e_pot_cell_gev = static_cast<double>(Bc) * (v_pot_dens / std::max(rho_b_lab, 1.0e-10));
-            }
-
-            const double E_floor = std::sqrt(P2 + (0.992 * m_rest_nuc) * (0.992 * m_rest_nuc));
-            const double Ec_t00 = mf_cfg.enabled ? std::max(E_floor, Ec + e_pot_cell_gev) : Ec;
-            double e_th_gev = (u0 * Ec_t00 - (Pxc * ux + Pyc * uy + Pzc * uz) - m_rest_nuc) / static_cast<double>(Bc);
-            if (cfg_.sampling != FreezeoutSampling::GrandCanonical && Bc == 1 && nb_cell > 1.0e-5 && snap.fields[18][c] > 0.0f) {
-                e_th_gev = 0.5 * ((static_cast<double>(snap.fields[18][c]) / nb_cell) - m_rest_nuc);
-            }
-            e_th_gev = std::clamp(e_th_gev, -0.0065, 0.350);
-            const bool use_smooth_yp = (cfg_.sampling == FreezeoutSampling::GrandCanonical) || (Bc < 16);
-            const double Yp = (!use_smooth_yp || snap.fields[10][c] <= 1.0e-6f)
-                                  ? (static_cast<double>(Np) / static_cast<double>(Bc))
-                                  : std::clamp(static_cast<double>(snap.fields[14][c]) /
-                                               static_cast<double>(snap.fields[10][c]),
-                                               0.001, 0.999);
-
-            double T_gev = 0.0, muB_gev = 0.0, muQ_gev = 0.0, n_eq[NUM_SPECIES] = {};
-            fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
-                                                cfg_.max_cluster_A, T_gev, muB_gev, muQ_gev, n_eq,
-                                                cfg_.quantum_statistics);
-
-            double Pstar_cell[6] = {};
-            for (int s = 0; s < 6; ++s) Pstar_cell[s] = snap.pkin_eckart[s][c];
-            double Lambda_cell[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-            double alphas[3] = {1.0, 1.0, 1.0};
-            if (cfg_.local_anisotropy) {
-                hcgf_detail::compute_pratt_torrieri_lambda(Pstar_cell, Lambda_cell, alphas);
-            }
-            const double a_min = std::min({alphas[0], alphas[1], alphas[2]});
-            const double a_max = std::max({alphas[0], alphas[1], alphas[2]});
-            const double p_xy_sum = Pstar_cell[0] + Pstar_cell[3];
-
-            const int ix = c % gcfg_.nx, iy = (c / gcfg_.nx) % gcfg_.ny, iz = c / (gcfg_.nx * gcfg_.ny);
+        // Parallelize local EoS inversion + Pratt-Torrieri tensor diagonalization across CPU threads!
+        struct CellThermo {
+            int ix = 0, iy = 0, iz = 0, Np = 0, Nn = 0, Bc = 0;
+            double Ec = 0.0, Ec_t00 = 0.0, Pxc = 0.0, Pyc = 0.0, Pzc = 0.0;
+            double vx_e = 0.0, vy_e = 0.0, vz_e = 0.0, u0 = 1.0;
+            double T_gev = 0.0, vol_scale = 0.0;
+            double Pstar[6] = {};
+            double Lambda[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+            double n_eq[NUM_SPECIES] = {};
             FreezeoutCellRecord rec{};
-            rec.step = step; rec.cell_id = c; rec.t_fm = t_fm;
-            rec.x_fm = gcfg_.xmin + (ix + 0.5) * gcfg_.dx();
-            rec.y_fm = gcfg_.ymin + (iy + 0.5) * gcfg_.dy();
-            rec.z_fm = gcfg_.zmin + (iz + 0.5) * gcfg_.dz();
-            rec.nB_eckart_fm3 = nb_cell;
-            rec.e_rest_mev_per_b = e_th_gev * 1.0e3;
-            rec.T_mev = T_gev * 1.0e3; rec.muB_mev = muB_gev * 1.0e3; rec.muQ_mev = muQ_gev * 1.0e3;
-            rec.ux = ux; rec.uy = uy; rec.uz = uz;
-            rec.aniso_stretch = (a_min > 0.0) ? (a_max / a_min) : 1.0;
-            rec.shear_xy = (p_xy_sum > 1.0e-14) ? ((Pstar_cell[0] - Pstar_cell[3]) / p_xy_sum) : 0.0;
-            rec.baryons_converted = Bc;
+        };
+        const std::size_t n_trig = trig_cells.size();
+        std::vector<CellThermo> thermos(n_trig);
+
+        auto compute_thermo_range = [&](std::size_t m0, std::size_t m1) {
+            for (std::size_t m = m0; m < m1; ++m) {
+                const int c = trig_cells[m].c;
+                const bool crossed_downward = trig_cells[m].crossed_downward;
+                const auto& idxs = cell_baryons_[c];
+                const double nb_cell = snap.fields[20][c];
+                CellThermo& th = thermos[m];
+
+                int Np = 0, Nn = 0;
+                double Ec = 0.0, Pxc = 0.0, Pyc = 0.0, Pzc = 0.0;
+                double jbx_c = 0.0, jby_c = 0.0, jbz_c = 0.0;
+                for (std::size_t idx : idxs) {
+                    const HostParticle& hp = host_p[idx];
+                    if (hp.species == PROTON) ++Np; else ++Nn;
+                    Ec += hp.E; Pxc += hp.px; Pyc += hp.py; Pzc += hp.pz;
+                    const double inv_e = 1.0 / hp.E;
+                    jbx_c += hp.px * inv_e; jby_c += hp.py * inv_e; jbz_c += hp.pz * inv_e;
+                }
+                const int Bc = Np + Nn;
+                const double P2 = Pxc * Pxc + Pyc * Pyc + Pzc * Pzc;
+                const double m_rest_nuc = Np * phys::MASS_PROTON + Nn * phys::MASS_NEUTRON;
+
+                double vx_e = jbx_c / static_cast<double>(Bc);
+                double vy_e = jby_c / static_cast<double>(Bc);
+                double vz_e = jbz_c / static_cast<double>(Bc);
+                if (cfg_.sampling == FreezeoutSampling::GrandCanonical && Bc < 16 && snap.fields[10][c] > 1.0e-5f) {
+                    vx_e = snap.fields[21][c];
+                    vy_e = snap.fields[22][c];
+                    vz_e = snap.fields[23][c];
+                }
+                const double ve2 = std::min(0.9990, vx_e * vx_e + vy_e * vy_e + vz_e * vz_e);
+                const double u0 = 1.0 / std::sqrt(1.0 - ve2);
+                const double ux = u0 * vx_e, uy = u0 * vy_e, uz = u0 * vz_e;
+                const double nb_raw = static_cast<double>(Bc) / (std::max(1, n_test) * gcfg_.cell_volume_fm3() * u0);
+                const double nb_loc = std::clamp(std::max(nb_cell, nb_raw), 0.005, cfg_.n_fr_fm3);
+                const double nB_eff = (crossed_downward && !force_finalize) ? cfg_.n_fr_fm3 : nb_loc;
+
+                const double delta_c = static_cast<double>(Nn - Np) / static_cast<double>(Bc);
+                double e_pot_cell_gev = 0.0;
+                if (mf_cfg.enabled) {
+                    const double rho_b_lab = nB_eff * u0;
+                    double md_avg = 0.0;
+                    if (std::fabs(mf_cfg.C_md_gev) > 1.0e-12) {
+                        const double pfx = Pxc / Bc, pfy = Pyc / Bc, pfz = Pzc / Bc;
+                        const double inv_lam2 = 1.0 / (mf_cfg.Lambda_md_gev * mf_cfg.Lambda_md_gev);
+                        for (std::size_t idx : idxs) {
+                            const HostParticle& hp = host_p[idx];
+                            const double qx = hp.px - pfx, qy = hp.py - pfy, qz = hp.pz - pfz;
+                            md_avg += 1.0 / (1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2);
+                        }
+                        md_avg /= static_cast<double>(Bc);
+                    }
+                    const double psi_val = (rho_b_lab / mf_cfg.rho0_fm3) * md_avg;
+                    const double v_pot_dens = hcgf_detail::eval_skyrme_md_t00_pot_density(rho_b_lab, delta_c, psi_val, mf_cfg);
+                    e_pot_cell_gev = static_cast<double>(Bc) * (v_pot_dens / std::max(rho_b_lab, 1.0e-10));
+                }
+
+                const double E_floor = std::sqrt(P2 + (0.992 * m_rest_nuc) * (0.992 * m_rest_nuc));
+                const double Ec_t00 = mf_cfg.enabled ? std::max(E_floor, Ec + e_pot_cell_gev) : Ec;
+                double e_th_gev = (u0 * Ec_t00 - (Pxc * ux + Pyc * uy + Pzc * uz) - m_rest_nuc) / static_cast<double>(Bc);
+                if (cfg_.sampling != FreezeoutSampling::GrandCanonical && Bc == 1 && nb_cell > 1.0e-5 && snap.fields[18][c] > 0.0f) {
+                    e_th_gev = 0.5 * ((static_cast<double>(snap.fields[18][c]) / nb_cell) - m_rest_nuc);
+                }
+                e_th_gev = std::clamp(e_th_gev, -0.0065, 0.350);
+                const bool use_smooth_yp = (cfg_.sampling == FreezeoutSampling::GrandCanonical) || (Bc < 16);
+                const double Yp = (!use_smooth_yp || snap.fields[10][c] <= 1.0e-6f)
+                                      ? (static_cast<double>(Np) / static_cast<double>(Bc))
+                                      : std::clamp(static_cast<double>(snap.fields[14][c]) /
+                                                   static_cast<double>(snap.fields[10][c]),
+                                                   0.001, 0.999);
+
+                double T_gev = 0.0, muB_gev = 0.0, muQ_gev = 0.0;
+                fo_detail::invert_local_cluster_eos(nB_eff, Yp, e_th_gev, cfg_.include_excited_clusters,
+                                                    cfg_.max_cluster_A, T_gev, muB_gev, muQ_gev, th.n_eq,
+                                                    cfg_.quantum_statistics);
+
+                for (int s = 0; s < 6; ++s) th.Pstar[s] = snap.pkin_eckart[s][c];
+                double alphas[3] = {1.0, 1.0, 1.0};
+                if (cfg_.local_anisotropy) {
+                    hcgf_detail::compute_pratt_torrieri_lambda(th.Pstar, th.Lambda, alphas);
+                }
+                const double a_min = std::min({alphas[0], alphas[1], alphas[2]});
+                const double a_max = std::max({alphas[0], alphas[1], alphas[2]});
+                const double p_xy_sum = th.Pstar[0] + th.Pstar[3];
+
+                const int ix = c % gcfg_.nx, iy = (c / gcfg_.nx) % gcfg_.ny, iz = c / (gcfg_.nx * gcfg_.ny);
+                th.ix = ix; th.iy = iy; th.iz = iz;
+                th.Np = Np; th.Nn = Nn; th.Bc = Bc;
+                th.Ec = Ec; th.Ec_t00 = Ec_t00; th.Pxc = Pxc; th.Pyc = Pyc; th.Pzc = Pzc;
+                th.vx_e = vx_e; th.vy_e = vy_e; th.vz_e = vz_e; th.u0 = u0;
+                th.T_gev = T_gev;
+
+                double nB_hrg = 0.0;
+                for (int id = 0; id < NUM_SPECIES; ++id) nB_hrg += get_species_info(id).baryon_num * th.n_eq[id];
+                th.vol_scale = (nB_hrg > 1.0e-12) ? (static_cast<double>(Bc) / nB_hrg) : 0.0;
+
+                th.rec.step = step; th.rec.cell_id = c; th.rec.t_fm = t_fm;
+                th.rec.x_fm = gcfg_.xmin + (ix + 0.5) * gcfg_.dx();
+                th.rec.y_fm = gcfg_.ymin + (iy + 0.5) * gcfg_.dy();
+                th.rec.z_fm = gcfg_.zmin + (iz + 0.5) * gcfg_.dz();
+                th.rec.nB_eckart_fm3 = nb_cell;
+                th.rec.e_rest_mev_per_b = e_th_gev * 1.0e3;
+                th.rec.T_mev = T_gev * 1.0e3; th.rec.muB_mev = muB_gev * 1.0e3; th.rec.muQ_mev = muQ_gev * 1.0e3;
+                th.rec.ux = ux; th.rec.uy = uy; th.rec.uz = uz;
+                th.rec.aniso_stretch = (a_min > 0.0) ? (a_max / a_min) : 1.0;
+                th.rec.shear_xy = (p_xy_sum > 1.0e-14) ? ((th.Pstar[0] - th.Pstar[3]) / p_xy_sum) : 0.0;
+                th.rec.baryons_converted = Bc;
+            }
+        };
+
+        if (n_trig > 0) {
+            (void)fo_detail::get_thermal_base_lut();  // Ensure static LUT initialized before spawning threads
+            const unsigned int hw = std::max(1u, std::min(12u, std::thread::hardware_concurrency()));
+            if (n_trig >= 32 && hw > 1) {
+                const std::size_t n_th = std::min<std::size_t>(hw, (n_trig + 15) / 16);
+                std::vector<std::thread> pool;
+                pool.reserve(n_th);
+                for (std::size_t t = 0; t < n_th; ++t) {
+                    const std::size_t m0 = (t * n_trig) / n_th;
+                    const std::size_t m1 = ((t + 1) * n_trig) / n_th;
+                    pool.emplace_back(compute_thermo_range, m0, m1);
+                }
+                for (auto& th_obj : pool) th_obj.join();
+            } else {
+                compute_thermo_range(0, n_trig);
+            }
+        }
+
+        for (std::size_t m = 0; m < n_trig; ++m) {
+            const int c = trig_cells[m].c;
+            PhiloxRng& rng = trig_cells[m].rng;
+            auto& idxs = cell_baryons_[c];
+            const CellThermo& th = thermos[m];
+            const int ix = th.ix, iy = th.iy, iz = th.iz;
+            const int Np = th.Np, Nn = th.Nn, Bc = th.Bc;
+            const double Ec = th.Ec, Ec_t00 = th.Ec_t00, Pxc = th.Pxc, Pyc = th.Pyc, Pzc = th.Pzc;
+            const double vx_e = th.vx_e, vy_e = th.vy_e, vz_e = th.vz_e, u0 = th.u0;
+            const double T_gev = th.T_gev, vol_scale = th.vol_scale;
+            const double* Pstar_cell = th.Pstar;
+            const double* Lambda_cell = th.Lambda;
+            const double* n_eq = th.n_eq;
+            FreezeoutCellRecord rec = th.rec;
 
             if (cfg_.mode == ClusterMode::None) {
                 for (std::size_t idx : idxs) host_p[idx].freezeout_tag = 1;
@@ -650,10 +840,6 @@ public:
                 mutated = true;
                 continue;
             }
-
-            double nB_hrg = 0.0;
-            for (int id = 0; id < NUM_SPECIES; ++id) nB_hrg += get_species_info(id).baryon_num * n_eq[id];
-            const double vol_scale = (nB_hrg > 1.0e-12) ? (static_cast<double>(Bc) / nB_hrg) : 0.0;
 
             if (cfg_.sampling == FreezeoutSampling::GrandCanonical) {
                 double gnx = 0.0, gny = 0.0, gnz = 0.0;
@@ -686,7 +872,7 @@ public:
                         const double es = std::sqrt(mk * mk + pxs * pxs + pys * pys + pzs * pzs);
                         const FourVector plab = lorentz_boost_from_cm(mk, es, pxs, pys, pzs, vxg, vyg, vzg, u0g);
 
-                        const double adv = dnb_dt_vec[c] + (plab.x * gnx + plab.y * gny + plab.z * gnz) / plab.t;
+                        const double adv = dnb_dt_vec_[c] + (plab.x * gnx + plab.y * gny + plab.z * gnz) / plab.t;
                         if (adv > 0.0) {
                             ++inward_gc;
                             if (outward_cut) continue;
@@ -724,7 +910,7 @@ public:
             mc.morton_blk = ((iz / 3) * 1024) + ((iy / 3) * 32) + (ix / 3);
             mc.Np = Np; mc.Nn = Nn; mc.Bc = Bc;
             mc.Ec = Ec; mc.Ec_t00 = Ec_t00; mc.Pxc = Pxc; mc.Pyc = Pyc; mc.Pzc = Pzc;
-            mc.T_gev = T_gev; mc.dnb_dt = dnb_dt_vec[c];
+            mc.T_gev = T_gev; mc.dnb_dt = dnb_dt_vec_[c];
             mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, mc.gnx, mc.gny, mc.gnz);
             for (int s = 0; s < 6; ++s) mc.Pstar[s] = Pstar_cell[s];
             for (int id = 0; id < NUM_SPECIES; ++id) mc.n_expect[id] = vol_scale * n_eq[id];
@@ -771,7 +957,7 @@ public:
                 gnx_w += mc.Bc * mc.gnx; gny_w += mc.Bc * mc.gny; gnz_w += mc.Bc * mc.gnz;
                 for (int s = 0; s < 6; ++s) Pstar_p[s] += mc.Bc * mc.Pstar[s];
                 for (int id = 0; id < NUM_SPECIES; ++id) n_exp_p[id] += mc.n_expect[id];
-                for (std::size_t idx : cell_baryons[mc.cell_id]) p_idxs.push_back(idx);
+                for (std::size_t idx : cell_baryons_[mc.cell_id]) p_idxs.push_back(idx);
             }
             if (Bp < 2) {
                 for (std::size_t idx : p_idxs) host_p[idx].freezeout_tag = 1;
@@ -881,13 +1067,13 @@ public:
         }
 
         if (mutated) {
-            std::vector<HostParticle> next_p;
-            next_p.reserve(host_p.size() + spawned.size());
+            next_p_.clear();
+            next_p_.reserve(host_p.size() + spawned.size());
             for (std::size_t i = 0; i < host_p.size(); ++i) {
-                if (!remove_mask[i]) next_p.push_back(host_p[i]);
+                if (!remove_mask[i]) next_p_.push_back(host_p[i]);
             }
-            for (const auto& sp : spawned) next_p.push_back(sp);
-            particles.upload(next_p);
+            for (const auto& sp : spawned) next_p_.push_back(sp);
+            particles.upload(next_p_);
         }
         return snap;
     }
@@ -919,7 +1105,11 @@ public:
 private:
     FreezeoutConfig cfg_;
     GridConfig gcfg_;
-    std::vector<double> peak_nb_, prev_nb_;
+    HcgfGpuWorkspace gpu_ws_;
+    std::vector<double> peak_nb_, prev_nb_, dnb_dt_vec_;
+    std::vector<std::vector<std::size_t>> dense_nucleons_, back_clusters_, cell_baryons_;
+    std::vector<int> touched_dn_, touched_bc_, touched_cb_;
+    std::vector<HostParticle> next_p_;
     double prev_t_fm_ = -1.0;
     std::vector<FreezeoutCellRecord> records_;
     long long total_baryons_converted_ = 0;

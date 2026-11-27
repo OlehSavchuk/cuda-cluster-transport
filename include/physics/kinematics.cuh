@@ -7,12 +7,12 @@
 namespace transport {
 
 struct FourVector {
-    Real t = 0;  // E or t
-    Real x = 0;  // px or x
-    Real y = 0;  // py or y
-    Real z = 0;  // pz or z
+    Real t;  // E or t
+    Real x;  // px or x
+    Real y;  // py or y
+    Real z;  // pz or z
 
-    HD_INLINE constexpr FourVector() = default;
+    HD_INLINE constexpr FourVector() : t(0), x(0), y(0), z(0) {}
     HD_INLINE constexpr FourVector(double t_, double x_, double y_, double z_)
         : t(static_cast<Real>(t_)), x(static_cast<Real>(x_)),
           y(static_cast<Real>(y_)), z(static_cast<Real>(z_)) {}

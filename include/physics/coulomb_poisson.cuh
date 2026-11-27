@@ -77,9 +77,9 @@ HD_INLINE double eval_multipole_potential_gev(double rx, double ry, double rz, c
     return phys::E2_COULOMB_GEV_FM * (mono + dip + 0.5 * quad_rr * inv_r5);
 }
 
-HD_INLINE void accum_cell_multipoles(const Real* rho_q, int c, const GridConfig& g, double* mp10) {
+HD_INLINE bool eval_cell_multipoles(const Real* rho_q, int c, const GridConfig& g, double out_mp[10]) {
     const double rq = static_cast<double>(rho_q[c]);
-    if (::fabs(rq) <= 1.0e-15) return;
+    if (::fabs(rq) <= 1.0e-15) return false;
     const int ix = c % g.nx;
     const int iy = (c / g.nx) % g.ny;
     const int iz = c / (g.nx * g.ny);
@@ -93,19 +93,26 @@ HD_INLINE void accum_cell_multipoles(const Real* rho_q, int c, const GridConfig&
     const double r2 = rx * rx + ry * ry + rz * rz;
     const double q = rq * dV;
 
-    portable_atomic_add_double(&mp10[0], q);
-    portable_atomic_add_double(&mp10[1], q * rx);
-    portable_atomic_add_double(&mp10[2], q * ry);
-    portable_atomic_add_double(&mp10[3], q * rz);
-    portable_atomic_add_double(&mp10[4], q * (3.0 * rx * rx - r2));
-    portable_atomic_add_double(&mp10[5], q * (3.0 * rx * ry));
-    portable_atomic_add_double(&mp10[6], q * (3.0 * rx * rz));
-    portable_atomic_add_double(&mp10[7], q * (3.0 * ry * ry - r2));
-    portable_atomic_add_double(&mp10[8], q * (3.0 * ry * rz));
-    portable_atomic_add_double(&mp10[9], q * (3.0 * rz * rz - r2));
+    out_mp[0] = q;
+    out_mp[1] = q * rx;
+    out_mp[2] = q * ry;
+    out_mp[3] = q * rz;
+    out_mp[4] = q * (3.0 * rx * rx - r2);
+    out_mp[5] = q * (3.0 * rx * ry);
+    out_mp[6] = q * (3.0 * rx * rz);
+    out_mp[7] = q * (3.0 * ry * ry - r2);
+    out_mp[8] = q * (3.0 * ry * rz);
+    out_mp[9] = q * (3.0 * rz * rz - r2);
+    return true;
 }
 
-HD_INLINE void build_poisson_rhs_cell(const Real* rho_q, double* rhs, int c,
+HD_INLINE void accum_cell_multipoles(const Real* rho_q, int c, const GridConfig& g, double* mp10) {
+    double loc[10];
+    if (!eval_cell_multipoles(rho_q, c, g, loc)) return;
+    for (int k = 0; k < 10; ++k) mp10[k] += loc[k];
+}
+
+HD_INLINE void build_poisson_rhs_cell(const Real* rho_q, Real* rhs, int c,
                                       const GridConfig& g, const double* mp10) {
     const double pref = 4.0 * phys::PI * phys::E2_COULOMB_GEV_FM;
     double val = pref * static_cast<double>(rho_q[c]);
@@ -125,18 +132,19 @@ HD_INLINE void build_poisson_rhs_cell(const Real* rho_q, double* rhs, int c,
         if (iz == 0)        val += eval_multipole_potential_gev(rx, ry, rz - dz, mp10) / (dz * dz);
         if (iz == g.nz - 1) val += eval_multipole_potential_gev(rx, ry, rz + dz, mp10) / (dz * dz);
     }
-    rhs[c] = val;
+    rhs[c] = static_cast<Real>(val);
 }
 
-// 1D matrix-tensor contraction along axis in {0, 1, 2}.
+// 1D matrix-tensor contraction along axis in {0, 1, 2} in Real precision (FP32 on GeForce GPUs!)
 // forward == true : dst(..., m, ...) = sum_i Q[m * N + i] * src(..., i, ...)
 // forward == false: dst(..., i, ...) = sum_m Q[m * N + i] * src(..., m, ...)
-HD_INLINE void transform_axis_1d_cell(const double* src, double* dst, const double* Q,
+HD_INLINE void transform_axis_1d_cell(const Real* __restrict__ src, Real* __restrict__ dst,
+                                      const Real* __restrict__ Q,
                                       int cid, int nx, int ny, int nz, int axis, bool forward) {
     const int ix = cid % nx;
     const int iy = (cid / nx) % ny;
     const int iz = cid / (nx * ny);
-    double sum = 0.0;
+    Real sum = Real(0);
     if (axis == 0) {
         const int base = nx * (iy + ny * iz);
         if (forward) {
@@ -162,39 +170,56 @@ HD_INLINE void transform_axis_1d_cell(const double* src, double* dst, const doub
     dst[cid] = sum;
 }
 
-HD_INLINE void spectral_poisson_div_cell(double* spec, Real* phi_raw_out, int cid,
+HD_INLINE void spectral_poisson_div_cell(Real* spec, Real* phi_raw_out, int cid,
                                          int nx, int ny, int nz,
-                                         const double* lx, const double* ly, const double* lz,
+                                         const Real* lx, const Real* ly, const Real* lz,
                                          bool write_out) {
     (void)nz;
     if (!write_out) {
         const int ix = cid % nx;
         const int iy = (cid / nx) % ny;
         const int iz = cid / (nx * ny);
-        const double denom = lx[ix] + ly[iy] + lz[iz];
-        spec[cid] = (denom > 1.0e-13) ? (spec[cid] / denom) : 0.0;
+        const Real denom = lx[ix] + ly[iy] + lz[iz];
+        spec[cid] = (denom > Real(1.0e-12)) ? (spec[cid] / denom) : Real(0);
     } else {
-        phi_raw_out[cid] = static_cast<Real>(spec[cid]);
+        phi_raw_out[cid] = spec[cid];
     }
 }
 
 #if TRANSPORT_HAS_CUDA
 __global__ void accum_multipoles_kernel(const Real* rho_q, int nc, GridConfig g, double* mp10) {
-    const int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c < nc) accum_cell_multipoles(rho_q, c, g, mp10);
+    __shared__ double s_mp[10][256];
+    const int tid = threadIdx.x;
+    const int c = blockIdx.x * blockDim.x + tid;
+    double loc[10] = {};
+    if (c < nc) eval_cell_multipoles(rho_q, c, g, loc);
+    for (int k = 0; k < 10; ++k) s_mp[k][tid] = loc[k];
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            for (int k = 0; k < 10; ++k) s_mp[k][tid] += s_mp[k][tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        for (int k = 0; k < 10; ++k) {
+            if (s_mp[k][0] != 0.0) portable_atomic_add_double(&mp10[k], s_mp[k][0]);
+        }
+    }
 }
-__global__ void build_rhs_kernel(const Real* rho_q, double* rhs, int nc, GridConfig g, const double* mp10) {
+__global__ void build_rhs_kernel(const Real* rho_q, Real* rhs, int nc, GridConfig g, const double* mp10) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c < nc) build_poisson_rhs_cell(rho_q, rhs, c, g, mp10);
 }
-__global__ void transform_axis_kernel(const double* src, double* dst, const double* Q,
+__global__ void transform_axis_kernel(const Real* __restrict__ src, Real* __restrict__ dst,
+                                      const Real* __restrict__ Q,
                                       int nc, int nx, int ny, int nz, int axis, bool forward) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c < nc) transform_axis_1d_cell(src, dst, Q, c, nx, ny, nz, axis, forward);
 }
-__global__ void spectral_div_or_cast_kernel(double* spec, Real* phi_out, int nc,
+__global__ void spectral_div_or_cast_kernel(Real* spec, Real* phi_out, int nc,
                                             int nx, int ny, int nz,
-                                            const double* lx, const double* ly, const double* lz,
+                                            const Real* lx, const Real* ly, const Real* lz,
                                             bool write_out) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c < nc) spectral_poisson_div_cell(spec, phi_out, c, nx, ny, nz, lx, ly, lz, write_out);
@@ -213,8 +238,13 @@ public:
         coulomb_detail::build_1d_laplacian_eigenbasis(gcfg_.nx, gcfg_.dx(), gcfg_.boundary, hQx, hlx);
         coulomb_detail::build_1d_laplacian_eigenbasis(gcfg_.ny, gcfg_.dy(), gcfg_.boundary, hQy, hly);
         coulomb_detail::build_1d_laplacian_eigenbasis(gcfg_.nz, gcfg_.dz(), gcfg_.boundary, hQz, hlz);
-        Qx_.copy_from_host(hQx); Qy_.copy_from_host(hQy); Qz_.copy_from_host(hQz);
-        lx_.copy_from_host(hlx); ly_.copy_from_host(hly); lz_.copy_from_host(hlz);
+        auto to_real = [](const std::vector<double>& v) {
+            std::vector<Real> out(v.size());
+            for (std::size_t i = 0; i < v.size(); ++i) out[i] = static_cast<Real>(v[i]);
+            return out;
+        };
+        Qx_.copy_from_host(to_real(hQx)); Qy_.copy_from_host(to_real(hQy)); Qz_.copy_from_host(to_real(hQz));
+        lx_.copy_from_host(to_real(hlx)); ly_.copy_from_host(to_real(hly)); lz_.copy_from_host(to_real(hlz));
         buf_a_.resize(nc); buf_b_.resize(nc);
         mp10_.resize(10);
     }
@@ -263,17 +293,17 @@ public:
     }
 
 private:
-    static void host_transform_axis(const double* src, double* dst, const double* Q,
+    static void host_transform_axis(const Real* src, Real* dst, const Real* Q,
                                     int nx, int ny, int nz, int axis, bool forward) {
-        std::memset(dst, 0, static_cast<std::size_t>(nx * ny * nz) * sizeof(double));
+        std::memset(dst, 0, static_cast<std::size_t>(nx * ny * nz) * sizeof(Real));
         if (axis == 0) {
             for (int yz = 0; yz < ny * nz; ++yz) {
-                const double* s = src + yz * nx;
-                double* d = dst + yz * nx;
+                const Real* s = src + yz * nx;
+                Real* d = dst + yz * nx;
                 for (int out_i = 0; out_i < nx; ++out_i) {
-                    double acc = 0.0;
+                    Real acc = Real(0);
                     if (forward) {
-                        const double* qrow = Q + out_i * nx;
+                        const Real* qrow = Q + out_i * nx;
                         for (int k = 0; k < nx; ++k) acc += qrow[k] * s[k];
                     } else {
                         for (int m = 0; m < nx; ++m) acc += Q[m * nx + out_i] * s[m];
@@ -284,10 +314,10 @@ private:
         } else if (axis == 1) {
             for (int iz = 0; iz < nz; ++iz) {
                 for (int out_j = 0; out_j < ny; ++out_j) {
-                    double* d = dst + nx * (out_j + ny * iz);
+                    Real* d = dst + nx * (out_j + ny * iz);
                     for (int k = 0; k < ny; ++k) {
-                        const double q = forward ? Q[out_j * ny + k] : Q[k * ny + out_j];
-                        const double* s = src + nx * (k + ny * iz);
+                        const Real q = forward ? Q[out_j * ny + k] : Q[k * ny + out_j];
+                        const Real* s = src + nx * (k + ny * iz);
                         for (int ix = 0; ix < nx; ++ix) d[ix] += q * s[ix];
                     }
                 }
@@ -295,17 +325,18 @@ private:
         } else {
             const int nxy = nx * ny;
             for (int out_k = 0; out_k < nz; ++out_k) {
-                double* d = dst + out_k * nxy;
+                Real* d = dst + out_k * nxy;
                 for (int k = 0; k < nz; ++k) {
-                    const double q = forward ? Q[out_k * nz + k] : Q[k * nz + out_k];
-                    const double* s = src + k * nxy;
+                    const Real q = forward ? Q[out_k * nz + k] : Q[k * nz + out_k];
+                    const Real* s = src + k * nxy;
                     for (int ixy = 0; ixy < nxy; ++ixy) d[ixy] += q * s[ixy];
                 }
             }
         }
     }
     GridConfig gcfg_;
-    DeviceBuffer<double> Qx_, Qy_, Qz_, lx_, ly_, lz_, buf_a_, buf_b_, mp10_;
+    DeviceBuffer<Real> Qx_, Qy_, Qz_, lx_, ly_, lz_, buf_a_, buf_b_;
+    DeviceBuffer<double> mp10_;
 };
 
 }  // namespace transport

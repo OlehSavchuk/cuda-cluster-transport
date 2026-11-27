@@ -1253,8 +1253,11 @@ void test_pauli_blocking_and_interacting_hcgf() {
     PauliGridConfig pcfg{}; pcfg.enabled = true;
     PauliPhaseSpaceGrid pgrid(pcfg);
     pgrid.rebuild(ps_chk, 80);
-    const double f_core = eval_pauli_f(pgrid.view(), NEUTRON, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    const double f_high = eval_pauli_f(pgrid.view(), NEUTRON, 0.0, 0.0, 0.0, 0.0, 0.0, 0.48);
+    const auto h_fp = pgrid.download_fp();
+    const auto h_fn = pgrid.download_fn();
+    const PauliPhaseSpaceView h_pview{pgrid.config(), h_fp.data(), h_fn.data()};
+    const double f_core = eval_pauli_f(h_pview, NEUTRON, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    const double f_high = eval_pauli_f(h_pview, NEUTRON, 0.0, 0.0, 0.0, 0.0, 0.0, 0.48);
     TEST_ASSERT(f_core > 0.82 && f_high < 0.05, "6D Pauli grid failed cold Fermi-sea occupancy check");
 
     GridConfig gcfg{}; gcfg.boundary = BoundaryMode::OpenExpanding;
@@ -1322,8 +1325,9 @@ void test_poisson_coulomb_potential_and_energy_conservation() {
     const double phi_c_exact = 1.5 * Z * phys::E2_COULOMB_GEV_FM / R_SPH;
     const double phi_ext_exact = Z * phys::E2_COULOMB_GEV_FM / 15.0;
     const double ecoul_exact = 0.6 * Z * Z * phys::E2_COULOMB_GEV_FM / R_SPH;
-    const double phi_c_num = mf_detail::sample_cic_scalar(mfg0.view().phi_coul, 0.0, 0.0, 0.0, gcfg);
-    const double phi_ext_num = mf_detail::sample_cic_scalar(mfg0.view().phi_coul, 15.0, 0.0, 0.0, gcfg);
+    const auto h_phi_coul = mfg0.download_phi_coul();
+    const double phi_c_num = mf_detail::sample_cic_scalar(h_phi_coul.data(), 0.0, 0.0, 0.0, gcfg);
+    const double phi_ext_num = mf_detail::sample_cic_scalar(h_phi_coul.data(), 15.0, 0.0, 0.0, gcfg);
     const double ecoul_num = mfg0.compute_coulomb_energy_test_gev(NT) / NT;
     TEST_ASSERT(std::fabs(phi_c_num - phi_c_exact) / phi_c_exact < 0.05 &&
                 std::fabs(phi_ext_num - phi_ext_exact) / phi_ext_exact < 0.03 &&

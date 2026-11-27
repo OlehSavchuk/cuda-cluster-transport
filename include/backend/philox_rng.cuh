@@ -47,7 +47,9 @@ struct PhiloxRng {
         std::uint32_t k0 = key[0];
         std::uint32_t k1 = key[1];
 
+#if defined(__CUDA_ARCH__)
         #pragma unroll
+#endif
         for (int round = 0; round < 10; ++round) {
             std::uint32_t hi0, lo0, hi1, lo1;
             mulhilo32(PHILOX_M0, c0, hi0, lo0);

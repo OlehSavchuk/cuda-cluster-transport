@@ -12,6 +12,30 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
+### Full FOPI $\text{Au}+\text{Au}$ Excitation Benchmark ($0.09\text{–}1.50\,A\;\text{GeV}$, All 10 Energies, `FP32` $N_{\text{test}}=1000$ + $10\times$ Oversampling)
+Complete 10-energy FOPI $\text{Au}+\text{Au}$ excitation-function benchmark (`90, 120, 150, 250, 400, 600, 800, 1000, 1200, 1500` $A\;\text{MeV}$, `scripts/run_fopi_all_energies_gc_oversample.py`, `10` BUU runs/energy = `5` central $b_0 < 0.15$ + `5` semi-central $0.25 < b_0 < 0.45$ at `N_test = 1000`, `--sampling gc --fo-oversample 10 --backflow remelt --eos sm --pauli on --coulomb on --anisotropy on --max-cluster-A 6 --nfr 0.02`):
+
+<p align="center">
+  <img src="assets/fopi_gc_oversample_all_energies_summary.png" alt="FOPI Au+Au 0.09-1.50 A GeV Excitation Functions Summary" width="100%">
+</p>
+
+<details>
+<summary><b>Per-Energy 6-Panel FOPI Comparisons (90 – 1500 A MeV)</b></summary>
+
+<p align="center">
+  <img src="assets/fopi_gc_oversample_auau0090.png" alt="FOPI Au+Au 90 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau0120.png" alt="FOPI Au+Au 120 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau0150.png" alt="FOPI Au+Au 150 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau0250.png" alt="FOPI Au+Au 250 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau0400.png" alt="FOPI Au+Au 400 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau0600.png" alt="FOPI Au+Au 600 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau0800.png" alt="FOPI Au+Au 800 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau1000.png" alt="FOPI Au+Au 1000 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau1200.png" alt="FOPI Au+Au 1200 A MeV" width="100%">
+  <img src="assets/fopi_gc_oversample_auau1500.png" alt="FOPI Au+Au 1500 A MeV" width="100%">
+</p>
+</details>
+
 ### 1. FOPI $\text{Au}+\text{Au}$ @ $1.2\,A\;\text{GeV}$: `SM` ($K_0 = 215\;\text{MeV}$) vs. `HM` ($K_0 = 380\;\text{MeV}$) Grand-Canonical HCGF + $\Delta(1232)/\pi$ Transport
 High-statistics (`6,400` $\text{Au}+\text{Au}$ events, `scripts/run_auau1200_benchmark.py`, `--elab-amev 1200 --box 68 --grid 68 --sampling gc --coulomb on --pauli on`) benchmark across central ($b_0 < 0.15$) baryon/cluster + pion multiplicities ($p, d, t, {}^3\text{He}, {}^4\text{He}, \pi^-, \pi^+$) and semi-central ($0.25 < b_0 < 0.45$) directed flow $v_1(y_0)$ ($u_{t0} > 0.4$) and squeeze-out $v_2(u_{t0})$ ($|y_0| < 0.4$) against FOPI Collaboration data:
 

@@ -449,7 +449,8 @@ HD_INLINE void eval_node_potentials(MeanFieldView& mf, int c) {
 
 // Symplectic momentum kick dp/dt = -grad_r U_cluster(A, Z, r, p) - Q * grad_r Phi_Coul(r) over dt
 HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
-                                    const MeanFieldView& mf, double* cm_accum) {
+                                    const MeanFieldView& mf, double loc_cm[4]) {
+    loc_cm[0] = 0.0; loc_cm[1] = 0.0; loc_cm[2] = 0.0; loc_cm[3] = 0.0;
     if (!p.active[i]) return;
     const SpeciesInfo sp = get_species_info(p.species[i]);
     const bool do_nuc = mf.cfg.enabled && (p.freezeout_tag[i] == 0) && (sp.baryon_num > 0);
@@ -532,10 +533,10 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
     p.px[i] += dpx;
     p.py[i] += dpy;
     p.pz[i] += dpz;
-    portable_atomic_add_double(&cm_accum[0], dpx * inv_fo);
-    portable_atomic_add_double(&cm_accum[1], dpy * inv_fo);
-    portable_atomic_add_double(&cm_accum[2], dpz * inv_fo);
-    portable_atomic_add_double(&cm_accum[3], w_cm);
+    loc_cm[0] = dpx * inv_fo;
+    loc_cm[1] = dpy * inv_fo;
+    loc_cm[2] = dpz * inv_fo;
+    loc_cm[3] = w_cm;
 }
 
 // Subtract spurious discrete-lattice net impulse proportional to mass so total 3-momentum is exact to ~1e-14
@@ -739,8 +740,22 @@ __global__ void eval_potentials_kernel(MeanFieldView mf, int n_cells) {
 }
 
 __global__ void kick_vlasov_kernel(ParticleSoAView p, double dt, MeanFieldView mf, double* cm_accum) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < p.n) kick_particle_vlasov(p, i, dt, mf, cm_accum);
+    __shared__ double s_cm[4][256];
+    const int tid = threadIdx.x;
+    const int i = blockIdx.x * blockDim.x + tid;
+    double loc_cm[4] = {0.0, 0.0, 0.0, 0.0};
+    if (i < p.n) kick_particle_vlasov(p, i, dt, mf, loc_cm);
+    for (int k = 0; k < 4; ++k) s_cm[k][tid] = loc_cm[k];
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            for (int k = 0; k < 4; ++k) s_cm[k][tid] += s_cm[k][tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0 && s_cm[3][0] > 0.0) {
+        for (int k = 0; k < 4; ++k) portable_atomic_add_double(&cm_accum[k], s_cm[k][0]);
+    }
 }
 
 __global__ void remove_cm_impulse_kernel(ParticleSoAView p, MeanFieldConfig cfg, double cx, double cy, double cz) {
@@ -799,8 +814,10 @@ public:
         }
     }
 
-    void rebuild_potentials(ParticleSystem& particles, int n_test) {
+    void rebuild_potentials(ParticleSystem& particles, int n_test, bool update_coulomb = true) {
         if (!cfg_.is_active()) return;
+        const bool do_coul = cfg_.coulomb_enabled && update_coulomb;
+        if (!cfg_.enabled && !do_coul) return;
         const int np = particles.slot_size();
         const int nc = gcfg_.num_cells();
         if (nc == 0) return;
@@ -810,18 +827,19 @@ public:
             px_sum_.zero(); py_sum_.zero(); pz_sum_.zero();
             psi_md_.zero();
         }
-        if (cfg_.coulomb_enabled) {
+        if (do_coul) {
             rho_q_.zero();
         }
 
         if (np == 0) {
-            u_loc_p_.zero(); u_loc_n_.zero(); u_md_dual_.zero();
-            phi_coul_raw_.zero(); phi_coul_.zero();
+            if (cfg_.enabled) { u_loc_p_.zero(); u_loc_n_.zero(); u_md_dual_.zero(); }
+            if (do_coul) { phi_coul_raw_.zero(); phi_coul_.zero(); }
             return;
         }
 
         ParticleSoAView pv = particles.view();
         MeanFieldView mfv = view();
+        mfv.cfg.coulomb_enabled = do_coul;
         const double inv_n_dV = 1.0 / (static_cast<double>(n_test) * gcfg_.cell_volume_fm3());
 
 #if TRANSPORT_HAS_CUDA
@@ -844,6 +862,7 @@ public:
             }
 
             if (std::fabs(cfg_.C_md_gev) > 1.0e-12) {
+                mfv = view();
                 const double inv_md = inv_n_dV / cfg_.rho0_fm3;
 #if TRANSPORT_HAS_CUDA
                 mf_detail::deposit_md_psi_cic_kernel<<<p_blocks, TPB>>>(pv, inv_md, mfv);
@@ -856,6 +875,7 @@ public:
                 }
             }
 
+            mfv = view();
 #if TRANSPORT_HAS_CUDA
             mf_detail::eval_potentials_kernel<<<c_blocks, TPB>>>(mfv, nc);
             CUDA_CHECK(cudaGetLastError());
@@ -870,13 +890,13 @@ public:
             }
         }
 
-        if (cfg_.coulomb_enabled) {
+        if (do_coul) {
             for (int pass = 0; pass < cfg_.gaussian_smooth_passes; ++pass) {
                 smooth_field_3d(rho_q_);
             }
             poisson_solver_.solve(rho_q_, phi_coul_raw_);
 #if TRANSPORT_HAS_CUDA
-            CUDA_CHECK(cudaMemcpy(phi_coul_.data(), phi_coul_raw_.data(), nc * sizeof(Real), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(phi_coul_.data(), phi_coul_raw_.data(), nc * sizeof(Real), cudaMemcpyDeviceToDevice));
 #else
             std::memcpy(phi_coul_.data(), phi_coul_raw_.data(), nc * sizeof(Real));
 #endif
@@ -906,7 +926,11 @@ public:
         CUDA_CHECK(cudaGetLastError());
 #else
         double* cm = cm_accum_.data();
-        for (int i = 0; i < np; ++i) mf_detail::kick_particle_vlasov(pv, i, dt, mfv, cm);
+        for (int i = 0; i < np; ++i) {
+            double loc_cm[4];
+            mf_detail::kick_particle_vlasov(pv, i, dt, mfv, loc_cm);
+            for (int k = 0; k < 4; ++k) cm[k] += loc_cm[k];
+        }
         const double inv_W = (cm[3] > 0.0) ? (1.0 / cm[3]) : 0.0;
         for (int i = 0; i < np; ++i) {
             mf_detail::remove_lattice_cm_impulse(pv, i, cfg_, cm[0] * inv_W, cm[1] * inv_W, cm[2] * inv_W);
@@ -1043,6 +1067,8 @@ public:
         return std::sqrt(var) / mean;
     }
 
+    std::vector<Real> download_phi_coul() const { return phi_coul_.to_vector(); }
+
     MeanFieldView view() {
         return MeanFieldView{
             cfg_, gcfg_,
@@ -1066,13 +1092,12 @@ private:
             mf_detail::smooth_axis_kernel<<<(nc + TPB - 1) / TPB, TPB>>>(
                 buf.data(), tmp_buf_.data(), nc, axis, gcfg_);
             CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaMemcpy(buf.data(), tmp_buf_.data(), nc * sizeof(Real), cudaMemcpyDeviceToDevice));
 #else
             for (int c = 0; c < nc; ++c) {
                 mf_detail::smooth_axis_cell(buf.data(), tmp_buf_.data(), c, axis, gcfg_);
             }
-            std::memcpy(buf.data(), tmp_buf_.data(), nc * sizeof(Real));
 #endif
+            buf.swap(tmp_buf_);
         }
     }
 

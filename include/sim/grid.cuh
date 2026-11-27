@@ -80,9 +80,9 @@ constexpr int SCAN_BLOCK_SIZE = 256;
 __global__ void assign_and_count_cells_kernel(ParticleSoAView p, GridView g) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= p.n) return;
-    if (!p.active[i]) {
+    if (!p.active[i] || p.freezeout_tag[i] != 0) {
         p.cell_id[i] = -1;
-        p.collided[i] = 0;
+        if (!p.active[i]) p.collided[i] = 0;
         return;
     }
 
@@ -215,9 +215,9 @@ public:
         int* sorted = sorted_indices_.data();
 
         for (int i = 0; i < np; ++i) {
-            if (!pview.active[i]) {
+            if (!pview.active[i] || pview.freezeout_tag[i] != 0) {
                 pview.cell_id[i] = -1;
-                pview.collided[i] = 0;
+                if (!pview.active[i]) pview.collided[i] = 0;
                 continue;
             }
             const int cid = detail::compute_cell_id(pview.x[i], pview.y[i], pview.z[i], cfg_);

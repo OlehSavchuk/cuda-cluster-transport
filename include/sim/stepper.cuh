@@ -152,8 +152,10 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
     double w_inel_sum = 0.0;
 
     if (rxn_cfg.enable_inelastic_2to2) {
-        for (int ch = 0; ch < NUM_INELASTIC_2TO2_CHANNELS; ++ch) {
-            if (!rxn_cfg.enable_nuclear_clusters && channel_involves_nuclear_cluster(ch)) continue;
+        constexpr int HADRON_ONLY_CHS[8] = {46, 47, 48, 49, 50, 51, 55, 56};
+        const int n_ch_scan = rxn_cfg.enable_nuclear_clusters ? NUM_INELASTIC_2TO2_CHANNELS : 8;
+        for (int ci = 0; ci < n_ch_scan; ++ci) {
+            const int ch = rxn_cfg.enable_nuclear_clusters ? ci : HADRON_ONLY_CHS[ci];
             int o3 = -1, o4 = -1;
             const double w = inelastic_2to2_vmoller_sigma_fm2(
                 ch, id1, id2, p1_in, p2_in, kin.sqrt_s,
@@ -277,7 +279,9 @@ HD_INLINE int try_pair_reaction(ParticleSoAView& p,
     const double prob_tot = w_tot * rate_prefactor;
     if (prob_tot <= 0.0) return 0;
 
-    portable_atomic_max_double(d_max_prob, prob_tot);
+    if (prob_tot > *d_max_prob) {
+        *d_max_prob = prob_tot;
+    }
     if (prob_tot > 1.0) {
         portable_atomic_add_ull(d_overflows, 1ULL);
     }
@@ -527,7 +531,7 @@ HD_INLINE bool try_resonance_decay(ParticleSoAView& p,
     const double cos_theta = 1.0 - 2.0 * rng.uniform();
     const double phi = phys::TWO_PI * rng.uniform();
     FourVector pa_out{}, pb_out{};
-    if (conserve_med_ec && mf_view.cfg.is_active()) {
+    if (conserve_med_ec && p.freezeout_tag[i] == 0 && mf_view.cfg.is_active()) {
         const double omega_in = E_R + mf_detail::eval_particle_potential_gev(
                                           mf_view, res_id, rx, ry, rz, p_res.x, p_res.y, p_res.z);
         const double sth = ::sqrt((1.0 - cos_theta * cos_theta > 0.0) ? (1.0 - cos_theta * cos_theta) : 0.0);
@@ -601,7 +605,7 @@ __global__ void decay_resonances_kernel(ParticleSoAView p,
                                         std::uint64_t decay_step_id,
                                         unsigned long long* d_decays) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_initial_slots) return;
+    if (i >= n_initial_slots || !p.active[i] || !get_species_info(p.species[i]).is_excited) return;
     PhiloxRng rng(seed, decay_step_id, static_cast<std::uint64_t>(i) + 0x9E3779B9ULL);
     if (try_resonance_decay(p, i, dt, mf_view, conserve_med_ec, pauli_view, rng)) {
         atomicAdd(d_decays, 1ULL);
@@ -647,6 +651,7 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
         pair_multiplicity_weight * sub_dt / (static_cast<double>(n_test) * dV);
 
     unsigned long long l_tested = 0, l_el = 0, l_inel = 0, l_form = 0;
+    double l_max_prob = 0.0;
 
     for (int k = threadIdx.x; k < num_disjoint; k += blockDim.x) {
         const int idx1 = cell_indices[2 * k];
@@ -659,7 +664,7 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
         ++l_tested;
         const int outcome = try_pair_reaction(
             p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg, mf_view, conserve_med_ec,
-            pauli_view, rng, &d_stats[4], &d_stats[6], d_max_prob);
+            pauli_view, rng, &d_stats[4], &d_stats[6], &l_max_prob);
         if (outcome == 1) ++l_el;
         else if (outcome == 2) ++l_inel;
         else if (outcome == 3) ++l_form;
@@ -669,6 +674,7 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
     if (l_el > 0)     atomicAdd(&d_stats[1], l_el);
     if (l_inel > 0)   atomicAdd(&d_stats[2], l_inel);
     if (l_form > 0)   atomicAdd(&d_stats[3], l_form);
+    if (l_max_prob > *d_max_prob) portable_atomic_max_double(d_max_prob, l_max_prob);
 }
 
 __global__ void collide_all_pairs_kernel(ParticleSoAView p,
@@ -703,6 +709,7 @@ __global__ void collide_all_pairs_kernel(ParticleSoAView p,
     const double rate_prefactor = sub_dt / (static_cast<double>(n_test) * dV);
 
     unsigned long long l_tested = 0, l_el = 0, l_inel = 0, l_form = 0;
+    double l_max_prob = 0.0;
 
     for (int a = 0; a < count - 1; ++a) {
         const int idx1 = cell_indices[a];
@@ -714,7 +721,7 @@ __global__ void collide_all_pairs_kernel(ParticleSoAView p,
             ++l_tested;
             const int outcome = try_pair_reaction(
                 p, idx1, idx2, rate_prefactor, g.cfg, xs_cfg, rxn_cfg, mf_view, conserve_med_ec,
-                pauli_view, rng, &d_stats[4], &d_stats[6], d_max_prob);
+                pauli_view, rng, &d_stats[4], &d_stats[6], &l_max_prob);
             if (outcome > 0) {
                 if (outcome == 1) ++l_el;
                 else if (outcome == 2) ++l_inel;
@@ -728,6 +735,7 @@ __global__ void collide_all_pairs_kernel(ParticleSoAView p,
     if (l_el > 0)     atomicAdd(&d_stats[1], l_el);
     if (l_inel > 0)   atomicAdd(&d_stats[2], l_inel);
     if (l_form > 0)   atomicAdd(&d_stats[3], l_form);
+    if (l_max_prob > *d_max_prob) portable_atomic_max_double(d_max_prob, l_max_prob);
 }
 
 #endif  // TRANSPORT_HAS_CUDA
@@ -763,7 +771,8 @@ public:
         const bool use_mf = (mf != nullptr && mf->config().is_active());
 
         if (use_mf) {
-            mf->rebuild_potentials(particles, step_cfg_.n_test);
+            const bool need_coul0 = !coul_valid_ || (particles.mutation_epoch() != last_coul_epoch_);
+            mf->rebuild_potentials(particles, step_cfg_.n_test, /*update_coulomb=*/need_coul0);
             if (step_cfg_.exact_hamiltonian_projection && !has_h_target_) {
                 double e0 = 0.0;
                 const auto snap0 = particles.download();
@@ -774,7 +783,7 @@ public:
             mf->kick(particles, half_dt);
             mf->drift(particles, half_dt);
             if (step_cfg_.in_medium_energy_conservation) {
-                mf->rebuild_potentials(particles, step_cfg_.n_test);
+                mf->rebuild_potentials(particles, step_cfg_.n_test, /*update_coulomb=*/true);
             }
         } else {
             drift(particles, grid.config(), half_dt);
@@ -794,9 +803,9 @@ public:
         }
 
         if (use_mf) {
-            mf->rebuild_potentials(particles, step_cfg_.n_test);
+            mf->rebuild_potentials(particles, step_cfg_.n_test, /*update_coulomb=*/false);
             mf->drift(particles, half_dt);
-            mf->rebuild_potentials(particles, step_cfg_.n_test);
+            mf->rebuild_potentials(particles, step_cfg_.n_test, /*update_coulomb=*/true);
             mf->kick(particles, half_dt);
             if (step_cfg_.exact_hamiltonian_projection && has_h_target_) {
                 mf->project_exact_hamiltonian(particles, step_cfg_.n_test, h_target_gev_);
@@ -806,6 +815,10 @@ public:
         }
 
         particles.compact_if_fragmented();
+        if (use_mf) {
+            coul_valid_ = true;
+            last_coul_epoch_ = particles.mutation_epoch();
+        }
         ++step_index_;
     }
 
@@ -877,7 +890,7 @@ public:
 
 #if TRANSPORT_HAS_CUDA
             if (step_cfg_.scheme == CollisionScheme::DisjointPairs) {
-                constexpr int BLOCK_THREADS = 64;
+                constexpr int BLOCK_THREADS = 128;
                 detail::collide_disjoint_pairs_kernel<<<n_cells, BLOCK_THREADS>>>(
                     pview, gview, xs_cfg_, rxn_cfg_, mf_view, med_ec, pauli_view, sub_dt, step_cfg_.n_test,
                     step_cfg_.seed, sub_counter, d_stats, d_maxp);
@@ -991,6 +1004,8 @@ private:
     PauliPhaseSpaceGrid pauli_grid_;
     std::uint64_t step_index_ = 0;
     bool has_h_target_ = false;
+    bool coul_valid_ = false;
+    std::uint64_t last_coul_epoch_ = 0;
     double h_target_gev_ = 0.0;
     DeviceBuffer<unsigned long long> d_ull_stats_;
     DeviceBuffer<double> d_max_prob_;

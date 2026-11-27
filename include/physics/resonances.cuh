@@ -23,9 +23,14 @@ struct ResonanceDecaySpec {
 };
 
 // Precomputed spectral normalization constants N_R = int_{m_min}^{m_max} A_raw(m) dm
-// Passed by value (224 bytes) into CUDA kernels for zero global memory overhead.
+// plus 6x96 O(1) Delta(1232) phase-space spectral integral tables for NN -> N Delta.
 struct SpectralNormTable {
+    static constexpr int DELTA_LUT_N = 96;
+    static constexpr double DELTA_S_MIN = 2.010;
+    static constexpr double DELTA_S_MAX = 3.650;
     double norm[NUM_SPECIES];
+    // [0..3]: (Delta-, Delta0, Delta+, Delta++) + p; [4..5]: (Delta0, Delta+) + n; [6]: (Delta++) + n; [7]: (Delta-) + n
+    float delta_ps_lut[8][DELTA_LUT_N]{};
 };
 
 // Map every unstable species R to its physical 2-body decay branches (TUNL / isospin rules)
@@ -303,6 +308,11 @@ HD_INLINE double spectral_function(int res_id, double m, const SpectralNormTable
     return (nrm > 0.0) ? (spectral_function_raw(res_id, m) / nrm) : 0.0;
 }
 
+HD_INLINE double phase_space_spectral_integral_quad(int res_id,
+                                                    double sqrt_s,
+                                                    double m_spec,
+                                                    const SpectralNormTable& norms);
+
 // Build exact SpectralNormTable on host using composite 8-point Gauss-Legendre quadrature
 inline SpectralNormTable compute_spectral_norm_table() {
     SpectralNormTable tbl{};
@@ -349,15 +359,28 @@ inline SpectralNormTable compute_spectral_norm_table() {
         }
         tbl.norm[id] = (sum > 0.0) ? sum : 1.0;
     }
+
+    // Precompute O(1) Delta(1232) phase-space spectral integral tables for NN -> N Delta
+    constexpr double ds = (SpectralNormTable::DELTA_S_MAX - SpectralNormTable::DELTA_S_MIN) /
+                          (SpectralNormTable::DELTA_LUT_N - 1);
+    for (int d = 0; d < 4; ++d) {
+        const int res_id = DELTA_MINUS + d;
+        for (int k = 0; k < SpectralNormTable::DELTA_LUT_N; ++k) {
+            const double sqs = SpectralNormTable::DELTA_S_MIN + k * ds;
+            tbl.delta_ps_lut[0 + d][k] =
+                static_cast<float>(phase_space_spectral_integral_quad(res_id, sqs, phys::MASS_PROTON, tbl));
+            tbl.delta_ps_lut[4 + d][k] =
+                static_cast<float>(phase_space_spectral_integral_quad(res_id, sqs, phys::MASS_NEUTRON, tbl));
+        }
+    }
     return tbl;
 }
 
-// 16-point Gauss-Legendre integral I_R(s) = int_{m_min}^{min(m_max, sqrt_s - m_spec)} dm A_R(m) p_cm(s; m_spec, m)
-// Used for exact 2 <-> 2 off-shell inelastic cross sections (N + d -> N + d*, N + 4He -> N + 4He*).
-HD_INLINE double phase_space_spectral_integral(int res_id,
-                                               double sqrt_s,
-                                               double m_spec,
-                                               const SpectralNormTable& norms) {
+// Exact 16-point Gauss-Legendre integral I_R(s) = int_{m_min}^{min(m_max, sqrt_s - m_spec)} dm A_R(m) p_cm(s; m_spec, m)
+HD_INLINE double phase_space_spectral_integral_quad(int res_id,
+                                                    double sqrt_s,
+                                                    double m_spec,
+                                                    const SpectralNormTable& norms) {
     const double m_min = resonance_min_mass(res_id);
     const double m_hi_kin = sqrt_s - m_spec;
     if (m_hi_kin <= m_min + 1.0e-9) return 0.0;
@@ -365,7 +388,6 @@ HD_INLINE double phase_space_spectral_integral(int res_id,
     const double m_max = resonance_max_mass(res_id);
     const double upper = (m_hi_kin < m_max) ? m_hi_kin : m_max;
 
-    // 8-point symmetric Gauss-Legendre nodes/weights on [-1, 1] (applied on 2 sub-intervals = 16 pts)
     constexpr double gx[4] = {
         0.183434642495649805, 0.525532409916328986,
         0.796666477413626740, 0.960289856497536232
@@ -376,7 +398,6 @@ HD_INLINE double phase_space_spectral_integral(int res_id,
     };
 
     const double m0 = get_species_info(res_id).pole_mass_gev;
-    // Place split point near pole mass if inside (m_min, upper) for sharp peak accuracy!
     const double split = (m0 > m_min + 1.0e-5 && m0 < upper - 1.0e-5)
                              ? m0
                              : (0.5 * (m_min + upper));
@@ -398,6 +419,31 @@ HD_INLINE double phase_space_spectral_integral(int res_id,
         }
     }
     return total;
+}
+
+// O(1) LUT-accelerated phase_space_spectral_integral for NN -> N Delta, exact quadrature fallback otherwise
+HD_INLINE double phase_space_spectral_integral(int res_id,
+                                               double sqrt_s,
+                                               double m_spec,
+                                               const SpectralNormTable& norms) {
+    if (is_delta(res_id) && sqrt_s <= SpectralNormTable::DELTA_S_MAX) {
+        if (sqrt_s <= SpectralNormTable::DELTA_S_MIN) return 0.0;
+        const int d_idx = res_id - DELTA_MINUS;  // 0..3
+        const int n_idx = (std::fabs(m_spec - phys::MASS_PROTON) < 1.0e-5)
+                              ? 0
+                              : ((std::fabs(m_spec - phys::MASS_NEUTRON) < 1.0e-5) ? 4 : -1);
+        if (n_idx >= 0 && norms.delta_ps_lut[n_idx + d_idx][SpectralNormTable::DELTA_LUT_N - 1] > 0.0f) {
+            constexpr double inv_ds = (SpectralNormTable::DELTA_LUT_N - 1) /
+                                      (SpectralNormTable::DELTA_S_MAX - SpectralNormTable::DELTA_S_MIN);
+            const double u = (sqrt_s - SpectralNormTable::DELTA_S_MIN) * inv_ds;
+            int k = static_cast<int>(u);
+            if (k >= SpectralNormTable::DELTA_LUT_N - 1) k = SpectralNormTable::DELTA_LUT_N - 2;
+            const float f = static_cast<float>(u - k);
+            const float* row = norms.delta_ps_lut[n_idx + d_idx];
+            return static_cast<double>((1.0f - f) * row[k] + f * row[k + 1]);
+        }
+    }
+    return phase_space_spectral_integral_quad(res_id, sqrt_s, m_spec, norms);
 }
 
 // Sample off-shell resonance mass m_R in [m_min, min(m_max, sqrt_s - m_spec)] from
