@@ -119,118 +119,111 @@ struct SpeciesInfo {
     int parity;             // +1 or -1
     int two_I;              // 2 * total isospin I
     int degeneracy;         // g = 2*J + 1
-    double pole_mass_gev;   // On-shell / Breit-Wigner pole mass [GeV]
-    double excitation_mev;  // Excitation energy above ground state (or threshold) [MeV]
-    double width_gev;       // Total decay width Gamma [GeV] (0 for stable states)
-    double rms_radius_fm;   // Matter RMS radius [fm] used in Glauber/optical cross sections
+    Real pole_mass_gev;     // On-shell / Breit-Wigner pole mass [GeV]
+    Real excitation_mev;    // Excitation energy above ground state (or threshold) [MeV]
+    Real width_gev;         // Total decay width Gamma [GeV] (0 for stable states)
+    Real rms_radius_fm;     // Matter RMS radius [fm] used in Glauber/optical cross sections
     bool is_excited;        // True for excited / resonant states
 };
 
+#define TR_SP_ROW(ID, A, Z, J2, P, I2, G, M, EX, W, R, EXC) \
+    {ID, A, Z, J2, P, I2, G, static_cast<Real>(M), static_cast<Real>(EX), static_cast<Real>(W), static_cast<Real>(R), EXC}
+
+#define TR_SPECIES_TABLE_INIT { \
+    TR_SP_ROW(PROTON,    1, 1, 1, +1, 1, 2, phys::MASS_PROTON,                          0.00,  0.0,      0.84, false), \
+    TR_SP_ROW(NEUTRON,   1, 0, 1, +1, 1, 2, phys::MASS_NEUTRON,                         0.00,  0.0,      0.84, false), \
+    TR_SP_ROW(DEUTERON,  2, 1, 2, +1, 0, 3, phys::MASS_DEUTERON,                        0.00,  0.0,      2.14, false), \
+    TR_SP_ROW(D_STAR_NN, 2, 0, 0, +1, 2, 1, 2.0 * phys::MASS_NEUTRON + 0.0010,          3.22,  0.0100,   3.80, true),  \
+    TR_SP_ROW(D_STAR_PN, 2, 1, 0, +1, 2, 1, phys::MASS_PROTON + phys::MASS_NEUTRON + 0.0010, 3.22, 0.0100, 3.80, true),\
+    TR_SP_ROW(D_STAR_PP, 2, 2, 0, +1, 2, 1, 2.0 * phys::MASS_PROTON + 0.0010,           3.22,  0.0100,   3.80, true),  \
+    TR_SP_ROW(TRITON,    3, 1, 1, +1, 1, 2, phys::MASS_TRITON,                          0.00,  0.0,      1.76, false), \
+    TR_SP_ROW(HELION,    3, 2, 1, +1, 1, 2, phys::MASS_HELION,                          0.00,  0.0,      1.97, false), \
+    TR_SP_ROW(ALPHA,     4, 2, 0, +1, 0, 1, phys::MASS_ALPHA,                           0.00,  0.0,      1.68, false), \
+    TR_SP_ROW(HE4_2021,  4, 2, 0, +1, 0, 1, phys::MASS_ALPHA + 0.02021,                20.21,  0.00050,  2.52, true),  \
+    TR_SP_ROW(HE4_2101,  4, 2, 0, -1, 0, 1, phys::MASS_ALPHA + 0.02101,                21.01,  0.00084,  2.35, true),  \
+    TR_SP_ROW(HE4_2184,  4, 2, 4, -1, 0, 5, phys::MASS_ALPHA + 0.02184,                21.84,  0.00201,  2.35, true),  \
+    TR_SP_ROW(HE4_2333,  4, 2, 4, -1, 2, 5, phys::MASS_ALPHA + 0.02333,                23.33,  0.00501,  2.40, true),  \
+    TR_SP_ROW(HE4_2364,  4, 2, 2, -1, 2, 3, phys::MASS_ALPHA + 0.02364,                23.64,  0.00620,  2.40, true),  \
+    TR_SP_ROW(HE4_2425,  4, 2, 2, -1, 0, 3, phys::MASS_ALPHA + 0.02425,                24.25,  0.00610,  2.42, true),  \
+    TR_SP_ROW(HE4_2528,  4, 2, 0, -1, 0, 1, phys::MASS_ALPHA + 0.02528,                25.28,  0.00797,  2.45, true),  \
+    TR_SP_ROW(HE4_2595,  4, 2, 2, -1, 0, 3, phys::MASS_ALPHA + 0.02595,                25.95,  0.01266,  2.48, true),  \
+    TR_SP_ROW(HE4_2640,  4, 2, 4, -1, 2, 5, phys::MASS_ALPHA + 0.02640,                26.40,  0.01070,  2.48, true),  \
+    TR_SP_ROW(HE4_2742,  4, 2, 4, +1, 0, 5, phys::MASS_ALPHA + 0.02742,                27.42,  0.00869,  2.50, true),  \
+    TR_SP_ROW(HE4_2797,  4, 2, 2, -1, 2, 3, phys::MASS_ALPHA + 0.02797,                27.97,  0.00900,  2.50, true),  \
+    TR_SP_ROW(HE4_2831,  4, 2, 2, +1, 0, 3, phys::MASS_ALPHA + 0.02831,                28.31,  0.00989,  2.52, true),  \
+    TR_SP_ROW(HE4_2837,  4, 2, 2, -1, 0, 3, phys::MASS_ALPHA + 0.02837,                28.37,  0.00392,  2.52, true),  \
+    TR_SP_ROW(HE4_2839,  4, 2, 4, -1, 0, 5, phys::MASS_ALPHA + 0.02839,                28.39,  0.00875,  2.52, true),  \
+    TR_SP_ROW(HE4_2864,  4, 2, 0, -1, 0, 1, phys::MASS_ALPHA + 0.02864,                28.64,  0.00489,  2.54, true),  \
+    TR_SP_ROW(HE4_2867,  4, 2, 4, +1, 0, 5, phys::MASS_ALPHA + 0.02867,                28.67,  0.00378,  2.54, true),  \
+    TR_SP_ROW(HE4_2989,  4, 2, 4, +1, 0, 5, phys::MASS_ALPHA + 0.02989,                29.89,  0.00972,  2.58, true),  \
+    TR_SP_ROW(H4_RES,    4, 1, 4, -1, 2, 5, phys::MASS_TRITON + phys::MASS_NEUTRON + 0.00319,  3.19, 0.00542, 2.42, true), \
+    TR_SP_ROW(LI4_RES,   4, 3, 4, -1, 2, 5, phys::MASS_HELION + phys::MASS_PROTON  + 0.00407,  4.07, 0.00603, 2.45, true), \
+    TR_SP_ROW(PION_MINUS,     0, -1, 0, -1, 2, 1, phys::MASS_PION_CHARGED,  0.00,   0.0,     0.66, false), \
+    TR_SP_ROW(PION_ZERO,      0,  0, 0, -1, 2, 1, phys::MASS_PION_NEUTRAL,  0.00,   0.0,     0.66, false), \
+    TR_SP_ROW(PION_PLUS,      0, +1, 0, -1, 2, 1, phys::MASS_PION_CHARGED,  0.00,   0.0,     0.66, false), \
+    TR_SP_ROW(DELTA_MINUS,    1, -1, 3, +1, 3, 4, phys::MASS_DELTA_1232,  293.00,   0.11800, 0.95, true),  \
+    TR_SP_ROW(DELTA_ZERO,     1,  0, 3, +1, 3, 4, phys::MASS_DELTA_1232,  293.00,   0.11800, 0.95, true),  \
+    TR_SP_ROW(DELTA_PLUS,     1, +1, 3, +1, 3, 4, phys::MASS_DELTA_1232,  293.00,   0.11800, 0.95, true),  \
+    TR_SP_ROW(DELTA_PLUSPLUS, 1, +2, 3, +1, 3, 4, phys::MASS_DELTA_1232,  293.00,   0.11800, 0.95, true),  \
+    TR_SP_ROW(H4_1M_350,      4, 1, 2, -1, 2, 3, phys::MASS_TRITON + phys::MASS_NEUTRON + 0.00350,   3.50, 0.00673, 2.44, true), \
+    TR_SP_ROW(H4_0M_527,      4, 1, 0, -1, 2, 1, phys::MASS_TRITON + phys::MASS_NEUTRON + 0.00527,   5.27, 0.00892, 2.46, true), \
+    TR_SP_ROW(H4_1M_602,      4, 1, 2, -1, 2, 3, phys::MASS_TRITON + phys::MASS_NEUTRON + 0.00602,   6.02, 0.01299, 2.48, true), \
+    TR_SP_ROW(LI4_1M_439,     4, 3, 2, -1, 2, 3, phys::MASS_HELION + phys::MASS_PROTON  + 0.00439,   4.39, 0.00735, 2.46, true), \
+    TR_SP_ROW(LI4_0M_615,     4, 3, 0, -1, 2, 1, phys::MASS_HELION + phys::MASS_PROTON  + 0.00615,   6.15, 0.00935, 2.48, true), \
+    TR_SP_ROW(LI4_1M_692,     4, 3, 2, -1, 2, 3, phys::MASS_HELION + phys::MASS_PROTON  + 0.00692,   6.92, 0.01351, 2.50, true), \
+    TR_SP_ROW(H5_GS,          5, 1, 1, +1, 3, 2, phys::MASS_TRITON + 2.0 * phys::MASS_NEUTRON + 0.00180, 1.80, 0.00190,  2.60, true), \
+    TR_SP_ROW(HE5_GS,         5, 2, 3, -1, 1, 4, phys::MASS_ALPHA  + phys::MASS_NEUTRON + 0.000798,      0.80, 0.000648, 2.45, true), \
+    TR_SP_ROW(HE5_127,        5, 2, 1, -1, 1, 2, phys::MASS_ALPHA  + phys::MASS_NEUTRON + 0.002068,      2.07, 0.00557,  2.52, true), \
+    TR_SP_ROW(HE5_1684,       5, 2, 3, +1, 1, 4, phys::MASS_DEUTERON + phys::MASS_TRITON + 0.000060,    17.65, 0.000075, 2.65, true), \
+    TR_SP_ROW(LI5_GS,         5, 3, 3, -1, 1, 4, phys::MASS_ALPHA  + phys::MASS_PROTON  + 0.001965,      1.97, 0.00123,  2.48, true), \
+    TR_SP_ROW(LI5_149,        5, 3, 1, -1, 1, 2, phys::MASS_ALPHA  + phys::MASS_PROTON  + 0.003455,      3.46, 0.00660,  2.55, true), \
+    TR_SP_ROW(LI5_1687,       5, 3, 3, +1, 1, 4, phys::MASS_DEUTERON + phys::MASS_HELION + 0.000480,    18.83, 0.000267, 2.68, true), \
+    TR_SP_ROW(H6_GS,          6, 1, 4, -1, 4, 5, phys::MASS_TRITON + 3.0 * phys::MASS_NEUTRON + 0.00270, 2.70, 0.00160,  2.75, true), \
+    TR_SP_ROW(HE6_GS,         6, 2, 0, +1, 2, 1, phys::MASS_HE6,                                   0.00, 0.0,      2.54, false),\
+    TR_SP_ROW(HE6_180,        6, 2, 4, +1, 2, 5, phys::MASS_HE6 + 0.001850,                        1.80, 0.000113, 2.65, true), \
+    TR_SP_ROW(LI6_GS,         6, 3, 2, +1, 0, 3, phys::MASS_LI6,                                   0.00, 0.0,      2.55, false),\
+    TR_SP_ROW(LI6_219,        6, 3, 6, +1, 0, 7, phys::MASS_LI6 + 0.002186,                        2.19, 0.000024, 2.62, true), \
+    TR_SP_ROW(LI6_431,        6, 3, 4, +1, 0, 5, phys::MASS_LI6 + 0.004312,                        4.31, 0.00130,  2.66, true), \
+    TR_SP_ROW(LI6_537,        6, 3, 4, +1, 2, 5, phys::MASS_LI6 + 0.005366,                        5.37, 0.00054,  2.68, true), \
+    TR_SP_ROW(LI6_565,        6, 3, 2, +1, 0, 3, phys::MASS_LI6 + 0.005650,                        5.65, 0.00150,  2.70, true), \
+    TR_SP_ROW(BE6_GS,         6, 4, 0, +1, 2, 1, phys::MASS_ALPHA + 2.0 * phys::MASS_PROTON + 0.001371,  1.37, 0.000092, 2.65, true), \
+    TR_SP_ROW(BE6_167,        6, 4, 4, +1, 2, 5, phys::MASS_ALPHA + 2.0 * phys::MASS_PROTON + 0.003041,  3.04, 0.00116,  2.72, true)  \
+}
+
+inline constexpr SpeciesInfo kHostSpeciesTable[NUM_SPECIES] = TR_SPECIES_TABLE_INIT;
+#if TRANSPORT_HAS_CUDA
+static __device__ __constant__ const SpeciesInfo kDevSpeciesTable[NUM_SPECIES] = TR_SPECIES_TABLE_INIT;
+#endif
+#undef TR_SP_ROW
+#undef TR_SPECIES_TABLE_INIT
+
 HD_INLINE constexpr SpeciesInfo get_species_info(int id) {
-    using namespace phys;
-    constexpr SpeciesInfo table[NUM_SPECIES] = {
-        // id, A, Z, 2J, P, 2I, g, mass [GeV], Ex [MeV], Gamma [GeV], R_rms [fm], excited
-        {PROTON,    1, 1, 1, +1, 1, 2, MASS_PROTON,                          0.00,  0.0,       0.84, false},
-        {NEUTRON,   1, 0, 1, +1, 1, 2, MASS_NEUTRON,                         0.00,  0.0,       0.84, false},
-
-        // A = 2: deuteron + singlet d* isospin triplet (modeled ~1 MeV above NN threshold)
-        {DEUTERON,  2, 1, 2, +1, 0, 3, MASS_DEUTERON,                        0.00,  0.0,       2.14, false},
-        {D_STAR_NN, 2, 0, 0, +1, 2, 1, 2.0 * MASS_NEUTRON + 0.0010,          3.22,  0.0100,    3.80, true},
-        {D_STAR_PN, 2, 1, 0, +1, 2, 1, MASS_PROTON + MASS_NEUTRON + 0.0010,  3.22,  0.0100,    3.80, true},
-        {D_STAR_PP, 2, 2, 0, +1, 2, 1, 2.0 * MASS_PROTON + 0.0010,           3.22,  0.0100,    3.80, true},
-
-        // A = 3: triton & helion
-        {TRITON,    3, 1, 1, +1, 1, 2, MASS_TRITON,                          0.00,  0.0,       1.76, false},
-        {HELION,    3, 2, 1, +1, 1, 2, MASS_HELION,                          0.00,  0.0,       1.97, false},
-
-        // A = 4: alpha ground state
-        {ALPHA,     4, 2, 0, +1, 0, 1, MASS_ALPHA,                           0.00,  0.0,       1.68, false},
-
-        // A = 4: discrete 4He* excited states (R_rms expanded relative to g.s. 4He = 1.68 fm;
-        // 20.21 MeV 0+ monopole state has documented diffuse breathing-mode radius ~2.5 fm)
-        {HE4_2021,  4, 2, 0, +1, 0, 1, MASS_ALPHA + 0.02021,                20.21,  0.00050,   2.52, true},
-        {HE4_2101,  4, 2, 0, -1, 0, 1, MASS_ALPHA + 0.02101,                21.01,  0.00084,   2.35, true},
-        {HE4_2184,  4, 2, 4, -1, 0, 5, MASS_ALPHA + 0.02184,                21.84,  0.00201,   2.35, true},
-        {HE4_2333,  4, 2, 4, -1, 2, 5, MASS_ALPHA + 0.02333,                23.33,  0.00501,   2.40, true},
-        {HE4_2364,  4, 2, 2, -1, 2, 3, MASS_ALPHA + 0.02364,                23.64,  0.00620,   2.40, true},
-        {HE4_2425,  4, 2, 2, -1, 0, 3, MASS_ALPHA + 0.02425,                24.25,  0.00610,   2.42, true},
-        {HE4_2528,  4, 2, 0, -1, 0, 1, MASS_ALPHA + 0.02528,                25.28,  0.00797,   2.45, true},
-        {HE4_2595,  4, 2, 2, -1, 0, 3, MASS_ALPHA + 0.02595,                25.95,  0.01266,   2.48, true},
-        {HE4_2640,  4, 2, 4, -1, 2, 5, MASS_ALPHA + 0.02640,                26.40,  0.01070,   2.48, true},
-        {HE4_2742,  4, 2, 4, +1, 0, 5, MASS_ALPHA + 0.02742,                27.42,  0.00869,   2.50, true},
-        {HE4_2797,  4, 2, 2, -1, 2, 3, MASS_ALPHA + 0.02797,                27.97,  0.00900,   2.50, true},
-        {HE4_2831,  4, 2, 2, +1, 0, 3, MASS_ALPHA + 0.02831,                28.31,  0.00989,   2.52, true},
-        {HE4_2837,  4, 2, 2, -1, 0, 3, MASS_ALPHA + 0.02837,                28.37,  0.00392,   2.52, true},
-        {HE4_2839,  4, 2, 4, -1, 0, 5, MASS_ALPHA + 0.02839,                28.39,  0.00875,   2.52, true},
-        {HE4_2864,  4, 2, 0, -1, 0, 1, MASS_ALPHA + 0.02864,                28.64,  0.00489,   2.54, true},
-        {HE4_2867,  4, 2, 4, +1, 0, 5, MASS_ALPHA + 0.02867,                28.67,  0.00378,   2.54, true},
-        {HE4_2989,  4, 2, 4, +1, 0, 5, MASS_ALPHA + 0.02989,                29.89,  0.00972,   2.58, true},
-
-        // A = 4, I = 1 resonant nuclei 4H and 4Li
-        {H4_RES,    4, 1, 4, -1, 2, 5, MASS_TRITON + MASS_NEUTRON + 0.00319,  3.19,  0.00542,   2.42, true},
-        {LI4_RES,   4, 3, 4, -1, 2, 5, MASS_HELION + MASS_PROTON + 0.00407,   4.07,  0.00603,   2.45, true},
-
-        // Pion isospin triplet (B = 0, J^P = 0-, I = 1, g = 1)
-        {PION_MINUS,     0, -1, 0, -1, 2, 1, MASS_PION_CHARGED,   0.00,   0.0,     0.66, false},
-        {PION_ZERO,      0,  0, 0, -1, 2, 1, MASS_PION_NEUTRAL,   0.00,   0.0,     0.66, false},
-        {PION_PLUS,      0, +1, 0, -1, 2, 1, MASS_PION_CHARGED,   0.00,   0.0,     0.66, false},
-
-        // Delta(1232) P33 isobar quartet (B = 1, J^P = 3/2+, I = 3/2, g = 4, Gamma_0 = 118 MeV)
-        {DELTA_MINUS,    1, -1, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
-        {DELTA_ZERO,     1,  0, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
-        {DELTA_PLUS,     1, +1, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
-        {DELTA_PLUSPLUS, 1, +2, 3, +1, 3, 4, MASS_DELTA_1232,   293.00,   0.11800, 0.95, true},
-
-        // Remaining A = 4, I = 1 TUNL excited multiplets of 4H and 4Li
-        {H4_1M_350,      4, 1, 2, -1, 2, 3, MASS_TRITON + MASS_NEUTRON + 0.00350,    3.50, 0.00673, 2.44, true},
-        {H4_0M_527,      4, 1, 0, -1, 2, 1, MASS_TRITON + MASS_NEUTRON + 0.00527,    5.27, 0.00892, 2.46, true},
-        {H4_1M_602,      4, 1, 2, -1, 2, 3, MASS_TRITON + MASS_NEUTRON + 0.00602,    6.02, 0.01299, 2.48, true},
-        {LI4_1M_439,     4, 3, 2, -1, 2, 3, MASS_HELION + MASS_PROTON  + 0.00439,    4.39, 0.00735, 2.46, true},
-        {LI4_0M_615,     4, 3, 0, -1, 2, 1, MASS_HELION + MASS_PROTON  + 0.00615,    6.15, 0.00935, 2.48, true},
-        {LI4_1M_692,     4, 3, 2, -1, 2, 3, MASS_HELION + MASS_PROTON  + 0.00692,    6.92, 0.01351, 2.50, true},
-
-        // A = 5 isotopes: 5H, 5He, 5Li (all particle-unstable resonances)
-        {H5_GS,          5, 1, 1, +1, 3, 2, MASS_TRITON + 2.0 * MASS_NEUTRON + 0.00180,  1.80, 0.00190, 2.60, true},
-        {HE5_GS,         5, 2, 3, -1, 1, 4, MASS_ALPHA  + MASS_NEUTRON + 0.000798,       0.80, 0.000648,2.45, true},
-        {HE5_127,        5, 2, 1, -1, 1, 2, MASS_ALPHA  + MASS_NEUTRON + 0.002068,       2.07, 0.00557, 2.52, true},
-        {HE5_1684,       5, 2, 3, +1, 1, 4, MASS_DEUTERON + MASS_TRITON + 0.000060,     17.65, 0.000075,2.65, true},
-        {LI5_GS,         5, 3, 3, -1, 1, 4, MASS_ALPHA  + MASS_PROTON  + 0.001965,       1.97, 0.00123, 2.48, true},
-        {LI5_149,        5, 3, 1, -1, 1, 2, MASS_ALPHA  + MASS_PROTON  + 0.003455,       3.46, 0.00660, 2.55, true},
-        {LI5_1687,       5, 3, 3, +1, 1, 4, MASS_DEUTERON + MASS_HELION + 0.000480,     18.83, 0.000267,2.68, true},
-
-        // A = 6 isotopes: 6H, 6He, 6Li, 6Be (bound 6He & 6Li g.s. + 8 resonant states)
-        {H6_GS,          6, 1, 4, -1, 4, 5, MASS_TRITON + 3.0 * MASS_NEUTRON + 0.00270,  2.70, 0.00160, 2.75, true},
-        {HE6_GS,         6, 2, 0, +1, 2, 1, MASS_HE6,                                    0.00, 0.0,     2.54, false},
-        {HE6_180,        6, 2, 4, +1, 2, 5, MASS_HE6 + 0.001850,                         1.80, 0.000113,2.65, true},
-        {LI6_GS,         6, 3, 2, +1, 0, 3, MASS_LI6,                                    0.00, 0.0,     2.55, false},
-        {LI6_219,        6, 3, 6, +1, 0, 7, MASS_LI6 + 0.002186,                         2.19, 0.000024,2.62, true},
-        {LI6_431,        6, 3, 4, +1, 0, 5, MASS_LI6 + 0.004312,                         4.31, 0.00130, 2.66, true},
-        {LI6_537,        6, 3, 4, +1, 2, 5, MASS_LI6 + 0.005366,                         5.37, 0.00054, 2.68, true},
-        {LI6_565,        6, 3, 2, +1, 0, 3, MASS_LI6 + 0.005650,                         5.65, 0.00150, 2.70, true},
-        {BE6_GS,         6, 4, 0, +1, 2, 1, MASS_ALPHA + 2.0 * MASS_PROTON + 0.001371,   1.37, 0.000092,2.65, true},
-        {BE6_167,        6, 4, 4, +1, 2, 5, MASS_ALPHA + 2.0 * MASS_PROTON + 0.003041,   3.04, 0.00116, 2.72, true}
-    };
-    return table[id];
+#if defined(__CUDA_ARCH__)
+    return kDevSpeciesTable[id];
+#else
+    return kHostSpeciesTable[id];
+#endif
 }
 
 // Effective non-negative proton/neutron constituent weights (wp >= 0, wn >= 0, wp + wn == A)
 // for Skyrme symmetry potentials and Glauber isospin-weighted cross sections.
 // Uses Clebsch-Gordan isospin projection for the I = 3/2 Delta(1232) quartet.
-HD_INLINE constexpr void get_effective_pn_weights(int id, double& wp, double& wn) {
+template <typename T>
+HD_INLINE constexpr void get_effective_pn_weights(int id, T& wp, T& wn) {
     if (is_pion(id)) {
-        wp = 0.0; wn = 0.0;
+        wp = T(0); wn = T(0);
     } else if (id == DELTA_PLUSPLUS) {
-        wp = 1.0; wn = 0.0;
+        wp = T(1); wn = T(0);
     } else if (id == DELTA_PLUS) {
-        wp = 2.0 / 3.0; wn = 1.0 / 3.0;
+        wp = T(2) / T(3); wn = T(1) / T(3);
     } else if (id == DELTA_ZERO) {
-        wp = 1.0 / 3.0; wn = 2.0 / 3.0;
+        wp = T(1) / T(3); wn = T(2) / T(3);
     } else if (id == DELTA_MINUS) {
-        wp = 0.0; wn = 1.0;
+        wp = T(0); wn = T(1);
     } else {
         const SpeciesInfo sp = get_species_info(id);
-        wp = static_cast<double>(sp.charge);
-        wn = static_cast<double>(sp.baryon_num - sp.charge);
+        wp = static_cast<T>(sp.charge);
+        wn = static_cast<T>(sp.baryon_num - sp.charge);
     }
 }
 

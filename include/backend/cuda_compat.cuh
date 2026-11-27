@@ -11,11 +11,13 @@
 #define TRANSPORT_HAS_CUDA 1
 #include <cuda_runtime.h>
 #define HD_INLINE __host__ __device__ __forceinline__
+#define HD_FUNC __host__ __device__ inline
 #define D_INLINE __device__ __forceinline__
 #define GLOBAL_KERNEL __global__
 #else
 #define TRANSPORT_HAS_CUDA 0
 #define HD_INLINE inline
+#define HD_FUNC inline
 #define D_INLINE inline
 #define GLOBAL_KERNEL inline
 #endif

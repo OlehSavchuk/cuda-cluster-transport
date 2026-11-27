@@ -76,6 +76,15 @@ struct PhiloxRng {
         return out[sub_idx++];
     }
 
+    // Uniform in (0, 1) in native Real precision (24-bit float in FP32, 53-bit double in FP64)
+    HD_INLINE Real uniform_real() {
+#if defined(TRANSPORT_SINGLE_PRECISION)
+        return (static_cast<float>(next_u32() >> 8) + 0.5f) * (1.0f / 16777216.0f);
+#else
+        return uniform();
+#endif
+    }
+
     // Uniform in (0, 1) with 53-bit double precision
     HD_INLINE double uniform() {
         std::uint64_t hi = static_cast<std::uint64_t>(next_u32() >> 5);

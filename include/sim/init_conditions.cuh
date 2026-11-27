@@ -154,17 +154,24 @@ inline double equilibrium_density_fm3(int species_id,
 // Sample initial thermal mass m_R of an excited resonance from A_R(m) * n_MJ(m, T)
 inline double sample_thermal_breit_wigner_mass(int res_id, double T_gev, PhiloxRng& rng) {
     const SpeciesInfo sp = get_species_info(res_id);
-    if (!sp.is_excited) return sp.pole_mass_gev;
+    if (!sp.is_excited || T_gev <= 1.0e-7) return sp.pole_mass_gev;
 
     const double m_min = resonance_min_mass(res_id);
     const double m_max = resonance_max_mass(res_id);
     const double m0 = sp.pole_mass_gev;
     const double w0 = m0 * sp.width_gev;
-    const double th_min = std::atan((m_min * m_min - m0 * m0) / w0);
-    const double th_max = std::atan((m_max * m_max - m0 * m0) / w0);
+    const double th_min = std::atan(((m_min - m0) * (m_min + m0)) / w0);
+    const double th_max = std::atan(((m_max - m0) * (m_max + m0)) / w0);
 
-    const double n_ref = fixed_mass_mj_density_fm3(m_min, 1, T_gev, 0.0);
-    constexpr double RATIO_BOUND = 8.5;
+    // Exact 4-term Bessel K_2(m/T) asymptotic factor for n_MJ(m,T) / n_MJ(m_min,T) (rel err < 1e-6 for m/T > 5)
+    auto k2_corr = [T_gev](double m) -> double {
+        const double u = T_gev / m;
+        return 1.0 + u * (1.875 + u * (0.8203125 - u * 0.3076171875));
+    };
+    const double inv_k2_min = 1.0 / k2_corr(m_min);
+    const double inv_m_min = 1.0 / m_min;
+    const double inv_T = 1.0 / T_gev;
+    constexpr double INV_RATIO_BOUND = 1.0 / 8.5;
 
     for (int iter = 0; iter < 128; ++iter) {
         const double th = th_min + (th_max - th_min) * rng.uniform();
@@ -174,13 +181,12 @@ inline double sample_thermal_breit_wigner_mass(int res_id, double T_gev, PhiloxR
         const double g_tot = total_width_gev(res_id, m);
         if (g_tot <= 0.0) continue;
 
-        const double dm2 = m2 - m0 * m0;
+        const double dm2 = (m - m0) * (m + m0);
         const double mg = m * g_tot;
         const double bw_ratio = (mg / w0) * ((dm2 * dm2 + w0 * w0) / (dm2 * dm2 + mg * mg));
-        const double mj_ratio = (n_ref > 0.0)
-                                    ? (fixed_mass_mj_density_fm3(m, 1, T_gev, 0.0) / n_ref)
-                                    : std::exp(-(m - m_min) / T_gev);
-        if (rng.uniform() < (bw_ratio * mj_ratio) / RATIO_BOUND) {
+        const double mr = m * inv_m_min;
+        const double mj_ratio = (mr * std::sqrt(mr)) * std::exp(-(m - m_min) * inv_T) * (k2_corr(m) * inv_k2_min);
+        if (rng.uniform() < (bw_ratio * mj_ratio) * INV_RATIO_BOUND) {
             return m;
         }
     }

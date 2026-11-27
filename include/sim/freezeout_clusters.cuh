@@ -451,10 +451,11 @@ public:
             return gpu_ws_.compute(particles, n_test, gcfg_, mf_cfg, excl_frozen, /*full_24_fields=*/true);
         }
 
-        const HcgfGridSnapshot& snap = gpu_ws_.compute(particles, n_test, gcfg_, mf_cfg, excl_frozen, full_tmunu);
+        const double n_melt = cfg_.melt_factor * cfg_.n_fr_fm3;
+        const HcgfGridSnapshot& snap = gpu_ws_.compute(
+            particles, n_test, gcfg_, mf_cfg, excl_frozen, full_tmunu, static_cast<float>(n_melt));
 
         const double dt_snap = (prev_t_fm_ >= 0.0 && t_fm > prev_t_fm_) ? (t_fm - prev_t_fm_) : 1.0;
-        const double n_melt = cfg_.melt_factor * cfg_.n_fr_fm3;
         bool any_candidate_cell = force_finalize;
         for (int c = 0; c < nc; ++c) {
             const double nb = snap.fields[20][c];
@@ -467,7 +468,7 @@ public:
                                       (dnb <= 0.0) && (snap.fields[10][c] > 0.0f);
                 const bool crossed = ((peak_nb_[c] >= cfg_.n_fr_fm3) && (nb < cfg_.n_fr_fm3) && (dnb <= 0.0)) || post_sep;
                 const bool fo_trig = cfg_.require_peak_crossing ? crossed : (nb < cfg_.n_fr_fm3 && snap.fields[10][c] > 0.0f);
-                const bool melt_trig = snap.has_frozen_particles &&
+                const bool melt_trig = snap.has_backflow_candidates &&
                                        (cfg_.backflow != BackflowMode::GhostFreeStream) && (nb > n_melt);
                 if (fo_trig || melt_trig) any_candidate_cell = true;
             }
@@ -677,7 +678,7 @@ public:
             trig_cells.push_back(TriggeredCell{c, crossed_downward, rng});
         }
 
-        // Parallelize local EoS inversion + Pratt-Torrieri tensor diagonalization across CPU threads!
+        // Parallelize local EoS inversion + Pratt-Torrieri + Grand-Canonical sampling across CPU threads!
         struct CellThermo {
             int ix = 0, iy = 0, iz = 0, Np = 0, Nn = 0, Bc = 0;
             double Ec = 0.0, Ec_t00 = 0.0, Pxc = 0.0, Pyc = 0.0, Pzc = 0.0;
@@ -687,6 +688,7 @@ public:
             double Lambda[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
             double n_eq[NUM_SPECIES] = {};
             FreezeoutCellRecord rec{};
+            std::vector<HostParticle> gc_spawned;
         };
         const std::size_t n_trig = trig_cells.size();
         std::vector<CellThermo> thermos(n_trig);
@@ -798,14 +800,70 @@ public:
                 th.rec.aniso_stretch = (a_min > 0.0) ? (a_max / a_min) : 1.0;
                 th.rec.shear_xy = (p_xy_sum > 1.0e-14) ? ((th.Pstar[0] - th.Pstar[3]) / p_xy_sum) : 0.0;
                 th.rec.baryons_converted = Bc;
+
+                if (cfg_.mode != ClusterMode::None && cfg_.sampling == FreezeoutSampling::GrandCanonical) {
+                    PhiloxRng& rng = trig_cells[m].rng;
+                    double gnx = 0.0, gny = 0.0, gnz = 0.0;
+                    mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, gnx, gny, gnz);
+                    const bool outward_cut = (!force_finalize && cfg_.backflow == BackflowMode::OutwardOnly);
+                    double vxg = vx_e, vyg = vy_e, vzg = vz_e, u0g = u0;
+                    if (Bc < 16 && snap.fields[10][c] > 1.0e-5f) {
+                        vxg = snap.fields[21][c]; vyg = snap.fields[22][c]; vzg = snap.fields[23][c];
+                        u0g = 1.0 / std::sqrt(1.0 - std::min(0.9990, vxg * vxg + vyg * vyg + vzg * vzg));
+                    }
+                    const int m_over = std::max(1, cfg_.oversample_factor);
+                    int n_cl_gc = 0, inward_gc = 0;
+                    std::size_t slot_cur = 0;
+                    th.gc_spawned.reserve(static_cast<std::size_t>(Bc * m_over));
+
+                    for (int id = 0; id < NUM_SPECIES; ++id) {
+                        const SpeciesInfo sp = get_species_info(id);
+                        if (sp.baryon_num < 1 || sp.baryon_num > cfg_.max_cluster_A || is_delta(id) || th.n_eq[id] <= 0.0) {
+                            continue;
+                        }
+                        if (sp.is_excited && !cfg_.include_excited_clusters) continue;
+                        const int n_draw = fo_detail::sample_poisson(static_cast<double>(m_over) * th.vol_scale * th.n_eq[id], rng);
+                        for (int d = 0; d < n_draw; ++d) {
+                            const double mk = sp.is_excited ? sample_thermal_breit_wigner_mass(id, T_gev, rng)
+                                                            : sp.pole_mass_gev;
+                            const FourVector q = sample_maxwell_juttner(mk, T_gev, rng);
+                            const double pxs = th.Lambda[0] * q.x + th.Lambda[1] * q.y + th.Lambda[2] * q.z;
+                            const double pys = th.Lambda[3] * q.x + th.Lambda[4] * q.y + th.Lambda[5] * q.z;
+                            const double pzs = th.Lambda[6] * q.x + th.Lambda[7] * q.y + th.Lambda[8] * q.z;
+                            const double es = std::sqrt(mk * mk + pxs * pxs + pys * pys + pzs * pzs);
+                            const FourVector plab = lorentz_boost_from_cm(mk, es, pxs, pys, pzs, vxg, vyg, vzg, u0g);
+
+                            const double adv = dnb_dt_vec_[c] + (plab.x * gnx + plab.y * gny + plab.z * gnz) / plab.t;
+                            if (adv > 0.0) {
+                                ++inward_gc;
+                                if (outward_cut) continue;
+                            }
+
+                            HostParticle hp = host_p[idxs[slot_cur % idxs.size()]];
+                            if (slot_cur >= idxs.size()) {
+                                hp.x = gcfg_.xmin + (ix + rng.uniform()) * gcfg_.dx();
+                                hp.y = gcfg_.ymin + (iy + rng.uniform()) * gcfg_.dy();
+                                hp.z = gcfg_.zmin + (iz + rng.uniform()) * gcfg_.dz();
+                            }
+                            ++slot_cur;
+                            hp.species = id; hp.mass = mk;
+                            hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
+                            hp.collided = 5; hp.freezeout_tag = m_over;
+                            th.gc_spawned.push_back(hp);
+                            if (sp.baryon_num >= 2) ++n_cl_gc;
+                        }
+                    }
+                    th.rec.clusters_formed = static_cast<int>(std::llround(static_cast<double>(n_cl_gc) / m_over));
+                    th.rec.back_emitted = static_cast<int>(std::llround(static_cast<double>(inward_gc) / m_over));
+                }
             }
         };
 
         if (n_trig > 0) {
             (void)fo_detail::get_thermal_base_lut();  // Ensure static LUT initialized before spawning threads
             const unsigned int hw = std::max(1u, std::min(12u, std::thread::hardware_concurrency()));
-            if (n_trig >= 32 && hw > 1) {
-                const std::size_t n_th = std::min<std::size_t>(hw, (n_trig + 15) / 16);
+            if (n_trig >= 16 && hw > 1) {
+                const std::size_t n_th = std::min<std::size_t>(hw, (n_trig + 7) / 8);
                 std::vector<std::thread> pool;
                 pool.reserve(n_th);
                 for (std::size_t t = 0; t < n_th; ++t) {
@@ -819,18 +877,21 @@ public:
             }
         }
 
+        if (cfg_.mode != ClusterMode::None && cfg_.sampling == FreezeoutSampling::GrandCanonical) {
+            std::size_t total_gc_add = 0;
+            for (std::size_t m = 0; m < n_trig; ++m) total_gc_add += thermos[m].gc_spawned.size();
+            spawned.reserve(spawned.size() + total_gc_add);
+        }
+
         for (std::size_t m = 0; m < n_trig; ++m) {
             const int c = trig_cells[m].c;
-            PhiloxRng& rng = trig_cells[m].rng;
             auto& idxs = cell_baryons_[c];
-            const CellThermo& th = thermos[m];
+            CellThermo& th = thermos[m];
             const int ix = th.ix, iy = th.iy, iz = th.iz;
             const int Np = th.Np, Nn = th.Nn, Bc = th.Bc;
             const double Ec = th.Ec, Ec_t00 = th.Ec_t00, Pxc = th.Pxc, Pyc = th.Pyc, Pzc = th.Pzc;
-            const double vx_e = th.vx_e, vy_e = th.vy_e, vz_e = th.vz_e, u0 = th.u0;
             const double T_gev = th.T_gev, vol_scale = th.vol_scale;
             const double* Pstar_cell = th.Pstar;
-            const double* Lambda_cell = th.Lambda;
             const double* n_eq = th.n_eq;
             FreezeoutCellRecord rec = th.rec;
 
@@ -842,65 +903,12 @@ public:
             }
 
             if (cfg_.sampling == FreezeoutSampling::GrandCanonical) {
-                double gnx = 0.0, gny = 0.0, gnz = 0.0;
-                mf_detail::cell_centered_grad(snap.fields[20].data(), ix, iy, iz, gcfg_, gnx, gny, gnz);
-                const bool outward_cut = (!force_finalize && cfg_.backflow == BackflowMode::OutwardOnly);
-                // Use smooth coarse-grained Eckart fluid velocity on sparse 1-fm^3 cells to avoid small-Bc boost noise!
-                double vxg = vx_e, vyg = vy_e, vzg = vz_e, u0g = u0;
-                if (Bc < 16 && snap.fields[10][c] > 1.0e-5f) {
-                    vxg = snap.fields[21][c]; vyg = snap.fields[22][c]; vzg = snap.fields[23][c];
-                    u0g = 1.0 / std::sqrt(1.0 - std::min(0.9990, vxg * vxg + vyg * vyg + vzg * vzg));
-                }
-                const int m_over = std::max(1, cfg_.oversample_factor);
-                int n_cl_gc = 0, inward_gc = 0;
-                std::size_t slot_cur = 0;
-
-                for (int id = 0; id < NUM_SPECIES; ++id) {
-                    const SpeciesInfo sp = get_species_info(id);
-                    if (sp.baryon_num < 1 || sp.baryon_num > cfg_.max_cluster_A || is_delta(id) || n_eq[id] <= 0.0) {
-                        continue;
-                    }
-                    if (sp.is_excited && !cfg_.include_excited_clusters) continue;
-                    const int n_draw = fo_detail::sample_poisson(static_cast<double>(m_over) * vol_scale * n_eq[id], rng);
-                    for (int d = 0; d < n_draw; ++d) {
-                        const double mk = sp.is_excited ? sample_thermal_breit_wigner_mass(id, T_gev, rng)
-                                                        : sp.pole_mass_gev;
-                        const FourVector q = sample_maxwell_juttner(mk, T_gev, rng);
-                        const double pxs = Lambda_cell[0] * q.x + Lambda_cell[1] * q.y + Lambda_cell[2] * q.z;
-                        const double pys = Lambda_cell[3] * q.x + Lambda_cell[4] * q.y + Lambda_cell[5] * q.z;
-                        const double pzs = Lambda_cell[6] * q.x + Lambda_cell[7] * q.y + Lambda_cell[8] * q.z;
-                        const double es = std::sqrt(mk * mk + pxs * pxs + pys * pys + pzs * pzs);
-                        const FourVector plab = lorentz_boost_from_cm(mk, es, pxs, pys, pzs, vxg, vyg, vzg, u0g);
-
-                        const double adv = dnb_dt_vec_[c] + (plab.x * gnx + plab.y * gny + plab.z * gnz) / plab.t;
-                        if (adv > 0.0) {
-                            ++inward_gc;
-                            if (outward_cut) continue;
-                        }
-
-                        HostParticle hp = host_p[idxs[slot_cur % idxs.size()]];
-                        if (slot_cur >= idxs.size()) {
-                            hp.x = gcfg_.xmin + (ix + rng.uniform()) * gcfg_.dx();
-                            hp.y = gcfg_.ymin + (iy + rng.uniform()) * gcfg_.dy();
-                            hp.z = gcfg_.zmin + (iz + rng.uniform()) * gcfg_.dz();
-                        }
-                        ++slot_cur;
-                        hp.species = id; hp.mass = mk;
-                        hp.E = plab.t; hp.px = plab.x; hp.py = plab.y; hp.pz = plab.z;
-                        hp.collided = 5; hp.freezeout_tag = m_over;
-                        spawned.push_back(hp);
-                        if (sp.baryon_num >= 2) ++n_cl_gc;
-                    }
-                }
+                spawned.insert(spawned.end(), th.gc_spawned.begin(), th.gc_spawned.end());
                 for (std::size_t idx : idxs) remove_mask[idx] = 1;
-                const int cl_scaled = static_cast<int>(std::llround(static_cast<double>(n_cl_gc) / m_over));
-                const int in_scaled = static_cast<int>(std::llround(static_cast<double>(inward_gc) / m_over));
-                rec.clusters_formed = cl_scaled;
-                rec.back_emitted = in_scaled;
                 records_.push_back(rec);
                 total_baryons_converted_ += Bc;
-                total_clusters_formed_ += cl_scaled;
-                back_emitted_total_ += in_scaled;
+                total_clusters_formed_ += rec.clusters_formed;
+                back_emitted_total_ += rec.back_emitted;
                 mutated = true;
                 continue;
             }

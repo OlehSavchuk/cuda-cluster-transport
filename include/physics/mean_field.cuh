@@ -172,21 +172,28 @@ HD_INLINE int cell_flat(int ix, int iy, int iz, const GridConfig& g) {
 
 // Compute base cell index (i0, j0, k0) and trilinear weights (fx, fy, fz) in [0, 1)
 // relative to cell centers x_c = xmin + (i + 0.5) * dx.
-HD_INLINE bool cic_weights(double x, double y, double z, const GridConfig& g,
+template <typename T>
+HD_INLINE bool cic_weights(T x, T y, T z, const GridConfig& g,
                            int& i0, int& j0, int& k0,
-                           double& fx, double& fy, double& fz) {
+                           T& fx, T& fy, T& fz) {
+    const T xmin = static_cast<T>(g.xmin), xmax = static_cast<T>(g.xmax);
+    const T ymin = static_cast<T>(g.ymin), ymax = static_cast<T>(g.ymax);
+    const T zmin = static_cast<T>(g.zmin), zmax = static_cast<T>(g.zmax);
     if (g.boundary == BoundaryMode::OpenExpanding) {
-        if (x < g.xmin || x >= g.xmax || y < g.ymin || y >= g.ymax || z < g.zmin || z >= g.zmax) {
+        if (x < xmin || x >= xmax || y < ymin || y >= ymax || z < zmin || z >= zmax) {
             return false;
         }
     }
-    const double gx = (x - g.xmin) / g.dx() - 0.5;
-    const double gy = (y - g.ymin) / g.dy() - 0.5;
-    const double gz = (z - g.zmin) / g.dz() - 0.5;
+    const T inv_dx = static_cast<T>(g.nx) / (xmax - xmin);
+    const T inv_dy = static_cast<T>(g.ny) / (ymax - ymin);
+    const T inv_dz = static_cast<T>(g.nz) / (zmax - zmin);
+    const T gx = (x - xmin) * inv_dx - T(0.5);
+    const T gy = (y - ymin) * inv_dy - T(0.5);
+    const T gz = (z - zmin) * inv_dz - T(0.5);
 
-    const double flx = ::floor(gx);
-    const double fly = ::floor(gy);
-    const double flz = ::floor(gz);
+    const T flx = std::floor(gx);
+    const T fly = std::floor(gy);
+    const T flz = std::floor(gz);
 
     i0 = static_cast<int>(flx);
     j0 = static_cast<int>(fly);
@@ -197,23 +204,23 @@ HD_INLINE bool cic_weights(double x, double y, double z, const GridConfig& g,
     return true;
 }
 
-HD_INLINE double sample_cic_scalar(const Real* field, double x, double y, double z,
-                                   const GridConfig& g) {
+HD_INLINE Real sample_cic_scalar(const Real* field, Real x, Real y, Real z,
+                                 const GridConfig& g) {
     int i0, j0, k0;
-    double fx, fy, fz;
-    if (!cic_weights(x, y, z, g, i0, j0, k0, fx, fy, fz)) return 0.0;
+    Real fx, fy, fz;
+    if (!cic_weights(x, y, z, g, i0, j0, k0, fx, fy, fz)) return Real(0);
 
-    double val = 0.0;
+    Real val = Real(0);
     for (int dz = 0; dz <= 1; ++dz) {
         const int iz = wrap_or_clamp_idx(k0 + dz, g.nz, g.boundary);
-        const double wz = (dz == 0) ? (1.0 - fz) : fz;
+        const Real wz = (dz == 0) ? (Real(1) - fz) : fz;
         for (int dy = 0; dy <= 1; ++dy) {
             const int iy = wrap_or_clamp_idx(j0 + dy, g.ny, g.boundary);
-            const double wy = (dy == 0) ? (1.0 - fy) : fy;
+            const Real wy = (dy == 0) ? (Real(1) - fy) : fy;
             for (int dx = 0; dx <= 1; ++dx) {
                 const int ix = wrap_or_clamp_idx(i0 + dx, g.nx, g.boundary);
-                const double wx = (dx == 0) ? (1.0 - fx) : fx;
-                val += (wx * wy * wz) * static_cast<double>(field[cell_flat(ix, iy, iz, g)]);
+                const Real wx = (dx == 0) ? (Real(1) - fx) : fx;
+                val += (wx * wy * wz) * field[cell_flat(ix, iy, iz, g)];
             }
         }
     }
@@ -238,12 +245,12 @@ HD_INLINE void cell_centered_grad(const FieldT* field, int ix, int iy, int iz,
 }
 
 // Exact variational gradient of CIC trilinear interpolation: d/dr (sum_c field[c] * W_CIC(r_c - r))
-HD_INLINE void sample_cic_grad(const Real* field, double x, double y, double z,
+HD_INLINE void sample_cic_grad(const Real* field, Real x, Real y, Real z,
                                const GridConfig& g,
-                               double& out_gx, double& out_gy, double& out_gz) {
-    out_gx = 0.0; out_gy = 0.0; out_gz = 0.0;
+                               Real& out_gx, Real& out_gy, Real& out_gz) {
+    out_gx = Real(0); out_gy = Real(0); out_gz = Real(0);
     int i0, j0, k0;
-    double fx, fy, fz;
+    Real fx, fy, fz;
     if (!cic_weights(x, y, z, g, i0, j0, k0, fx, fy, fz)) return;
 
     const int ix0 = wrap_or_clamp_idx(i0, g.nx, g.boundary);
@@ -253,33 +260,37 @@ HD_INLINE void sample_cic_grad(const Real* field, double x, double y, double z,
     const int iz0 = wrap_or_clamp_idx(k0, g.nz, g.boundary);
     const int iz1 = wrap_or_clamp_idx(k0 + 1, g.nz, g.boundary);
 
-    const double c000 = field[cell_flat(ix0, iy0, iz0, g)];
-    const double c100 = field[cell_flat(ix1, iy0, iz0, g)];
-    const double c010 = field[cell_flat(ix0, iy1, iz0, g)];
-    const double c110 = field[cell_flat(ix1, iy1, iz0, g)];
-    const double c001 = field[cell_flat(ix0, iy0, iz1, g)];
-    const double c101 = field[cell_flat(ix1, iy0, iz1, g)];
-    const double c011 = field[cell_flat(ix0, iy1, iz1, g)];
-    const double c111 = field[cell_flat(ix1, iy1, iz1, g)];
+    const Real c000 = field[cell_flat(ix0, iy0, iz0, g)];
+    const Real c100 = field[cell_flat(ix1, iy0, iz0, g)];
+    const Real c010 = field[cell_flat(ix0, iy1, iz0, g)];
+    const Real c110 = field[cell_flat(ix1, iy1, iz0, g)];
+    const Real c001 = field[cell_flat(ix0, iy0, iz1, g)];
+    const Real c101 = field[cell_flat(ix1, iy0, iz1, g)];
+    const Real c011 = field[cell_flat(ix0, iy1, iz1, g)];
+    const Real c111 = field[cell_flat(ix1, iy1, iz1, g)];
 
-    out_gx = ((1.0 - fy) * (1.0 - fz) * (c100 - c000) +
-              fy         * (1.0 - fz) * (c110 - c010) +
-              (1.0 - fy) * fz         * (c101 - c001) +
-              fy         * fz         * (c111 - c011)) / g.dx();
+    const Real inv_dx = static_cast<Real>(g.nx) / static_cast<Real>(g.xmax - g.xmin);
+    const Real inv_dy = static_cast<Real>(g.ny) / static_cast<Real>(g.ymax - g.ymin);
+    const Real inv_dz = static_cast<Real>(g.nz) / static_cast<Real>(g.zmax - g.zmin);
 
-    out_gy = ((1.0 - fx) * (1.0 - fz) * (c010 - c000) +
-              fx         * (1.0 - fz) * (c110 - c100) +
-              (1.0 - fx) * fz         * (c011 - c001) +
-              fx         * fz         * (c111 - c101)) / g.dy();
+    out_gx = ((Real(1) - fy) * (Real(1) - fz) * (c100 - c000) +
+              fy             * (Real(1) - fz) * (c110 - c010) +
+              (Real(1) - fy) * fz             * (c101 - c001) +
+              fy             * fz             * (c111 - c011)) * inv_dx;
 
-    out_gz = ((1.0 - fx) * (1.0 - fy) * (c001 - c000) +
-              fx         * (1.0 - fy) * (c101 - c100) +
-              (1.0 - fx) * fy         * (c011 - c010) +
-              fx         * fy         * (c111 - c110)) / g.dz();
+    out_gy = ((Real(1) - fx) * (Real(1) - fz) * (c010 - c000) +
+              fx             * (Real(1) - fz) * (c110 - c100) +
+              (Real(1) - fx) * fz             * (c011 - c001) +
+              fx             * fz             * (c111 - c101)) * inv_dy;
+
+    out_gz = ((Real(1) - fx) * (Real(1) - fy) * (c001 - c000) +
+              fx             * (Real(1) - fy) * (c101 - c100) +
+              (Real(1) - fx) * fy             * (c011 - c010) +
+              fx             * fy             * (c111 - c110)) * inv_dz;
 }
 
 HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
-                                           double norm_inv_n_dV, MeanFieldView& mf) {
+                                           Real norm_inv_n_dV, MeanFieldView& mf) {
     if (!p.active[i]) return;
     const SpeciesInfo sp = get_species_info(p.species[i]);
     const bool do_nuc = mf.cfg.enabled && (p.freezeout_tag[i] == 0) && (sp.baryon_num > 0);
@@ -287,12 +298,12 @@ HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
     if (!do_nuc && !do_coul) return;
 
     int i0, j0, k0;
-    double fx, fy, fz;
+    Real fx, fy, fz;
     if (!cic_weights(p.x[i], p.y[i], p.z[i], mf.gcfg, i0, j0, k0, fx, fy, fz)) return;
 
-    double zp = 0.0, zn = 0.0, pxw = 0.0, pyw = 0.0, pzw = 0.0;
+    Real zp = Real(0), zn = Real(0), pxw = Real(0), pyw = Real(0), pzw = Real(0);
     if (do_nuc) {
-        double wp = 0.0, wn = 0.0;
+        Real wp = Real(0), wn = Real(0);
         get_effective_pn_weights(p.species[i], wp, wn);
         zp = wp * norm_inv_n_dV;
         zn = wn * norm_inv_n_dV;
@@ -300,28 +311,28 @@ HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
         pyw = p.py[i] * norm_inv_n_dV;
         pzw = p.pz[i] * norm_inv_n_dV;
     }
-    const double inv_fo = (p.freezeout_tag[i] > 1) ? (1.0 / static_cast<double>(p.freezeout_tag[i])) : 1.0;
-    const double zq = do_coul ? (static_cast<double>(sp.charge) * norm_inv_n_dV * inv_fo) : 0.0;
+    const Real inv_fo = (p.freezeout_tag[i] > 1) ? (Real(1) / static_cast<Real>(p.freezeout_tag[i])) : Real(1);
+    const Real zq = do_coul ? (static_cast<Real>(sp.charge) * norm_inv_n_dV * inv_fo) : Real(0);
 
     for (int dz = 0; dz <= 1; ++dz) {
         const int iz = wrap_or_clamp_idx(k0 + dz, mf.gcfg.nz, mf.gcfg.boundary);
-        const double wz = (dz == 0) ? (1.0 - fz) : fz;
+        const Real wz = (dz == 0) ? (Real(1) - fz) : fz;
         for (int dy = 0; dy <= 1; ++dy) {
             const int iy = wrap_or_clamp_idx(j0 + dy, mf.gcfg.ny, mf.gcfg.boundary);
-            const double wy = (dy == 0) ? (1.0 - fy) : fy;
+            const Real wy = (dy == 0) ? (Real(1) - fy) : fy;
             for (int dx = 0; dx <= 1; ++dx) {
                 const int ix = wrap_or_clamp_idx(i0 + dx, mf.gcfg.nx, mf.gcfg.boundary);
-                const double w = ((dx == 0) ? (1.0 - fx) : fx) * wy * wz;
+                const Real w = ((dx == 0) ? (Real(1) - fx) : fx) * wy * wz;
                 const int c = cell_flat(ix, iy, iz, mf.gcfg);
                 if (do_nuc) {
-                    if (zp > 0.0) portable_atomic_add_real(&mf.rho_p[c], static_cast<Real>(w * zp));
-                    if (zn > 0.0) portable_atomic_add_real(&mf.rho_n[c], static_cast<Real>(zn * w));
-                    portable_atomic_add_real(&mf.px_sum[c], static_cast<Real>(w * pxw));
-                    portable_atomic_add_real(&mf.py_sum[c], static_cast<Real>(w * pyw));
-                    portable_atomic_add_real(&mf.pz_sum[c], static_cast<Real>(w * pzw));
+                    if (zp > Real(0)) portable_atomic_add_real(&mf.rho_p[c], w * zp);
+                    if (zn > Real(0)) portable_atomic_add_real(&mf.rho_n[c], zn * w);
+                    portable_atomic_add_real(&mf.px_sum[c], w * pxw);
+                    portable_atomic_add_real(&mf.py_sum[c], w * pyw);
+                    portable_atomic_add_real(&mf.pz_sum[c], w * pzw);
                 }
                 if (do_coul) {
-                    portable_atomic_add_real(&mf.rho_q[c], static_cast<Real>(w * zq));
+                    portable_atomic_add_real(&mf.rho_q[c], w * zq);
                 }
             }
         }
@@ -329,24 +340,24 @@ HD_INLINE void deposit_particle_baryon_cic(const ParticleSoAView& p, int i,
 }
 
 HD_INLINE void sample_cic_flow_and_u(const MeanFieldView& mf,
-                                     double x, double y, double z,
-                                     double& u_out,
-                                     double& pfx, double& pfy, double& pfz) {
-    u_out = 0.0; pfx = 0.0; pfy = 0.0; pfz = 0.0;
+                                     Real x, Real y, Real z,
+                                     Real& u_out,
+                                     Real& pfx, Real& pfy, Real& pfz) {
+    u_out = Real(0); pfx = Real(0); pfy = Real(0); pfz = Real(0);
     int i0, j0, k0;
-    double fx, fy, fz;
+    Real fx, fy, fz;
     if (!cic_weights(x, y, z, mf.gcfg, i0, j0, k0, fx, fy, fz)) return;
 
-    double rho_tot = 0.0, pi_x = 0.0, pi_y = 0.0, pi_z = 0.0;
+    Real rho_tot = Real(0), pi_x = Real(0), pi_y = Real(0), pi_z = Real(0);
     for (int dz = 0; dz <= 1; ++dz) {
         const int iz = wrap_or_clamp_idx(k0 + dz, mf.gcfg.nz, mf.gcfg.boundary);
-        const double wz = (dz == 0) ? (1.0 - fz) : fz;
+        const Real wz = (dz == 0) ? (Real(1) - fz) : fz;
         for (int dy = 0; dy <= 1; ++dy) {
             const int iy = wrap_or_clamp_idx(j0 + dy, mf.gcfg.ny, mf.gcfg.boundary);
-            const double wy = (dy == 0) ? (1.0 - fy) : fy;
+            const Real wy = (dy == 0) ? (Real(1) - fy) : fy;
             for (int dx = 0; dx <= 1; ++dx) {
                 const int ix = wrap_or_clamp_idx(i0 + dx, mf.gcfg.nx, mf.gcfg.boundary);
-                const double w = ((dx == 0) ? (1.0 - fx) : fx) * wy * wz;
+                const Real w = ((dx == 0) ? (Real(1) - fx) : fx) * wy * wz;
                 const int c = cell_flat(ix, iy, iz, mf.gcfg);
                 rho_tot += w * (mf.rho_p[c] + mf.rho_n[c]);
                 pi_x += w * mf.px_sum[c];
@@ -355,9 +366,9 @@ HD_INLINE void sample_cic_flow_and_u(const MeanFieldView& mf,
             }
         }
     }
-    u_out = rho_tot / mf.cfg.rho0_fm3;
-    if (rho_tot > 1.0e-10) {
-        const double inv_r = 1.0 / rho_tot;
+    u_out = rho_tot / static_cast<Real>(mf.cfg.rho0_fm3);
+    if (rho_tot > Real(1.0e-10)) {
+        const Real inv_r = Real(1) / rho_tot;
         pfx = pi_x * inv_r;
         pfy = pi_y * inv_r;
         pfz = pi_z * inv_r;
@@ -365,35 +376,36 @@ HD_INLINE void sample_cic_flow_and_u(const MeanFieldView& mf,
 }
 
 HD_INLINE void deposit_particle_md_psi_cic(const ParticleSoAView& p, int i,
-                                           double norm_inv_n_dV_rho0, MeanFieldView& mf) {
+                                           Real norm_inv_n_dV_rho0, MeanFieldView& mf) {
     if (!p.active[i] || p.freezeout_tag[i] != 0) return;
     int i0, j0, k0;
-    double fx, fy, fz;
+    Real fx, fy, fz;
     if (!cic_weights(p.x[i], p.y[i], p.z[i], mf.gcfg, i0, j0, k0, fx, fy, fz)) return;
 
-    double u_loc, pfx, pfy, pfz;
+    Real u_loc, pfx, pfy, pfz;
     sample_cic_flow_and_u(mf, p.x[i], p.y[i], p.z[i], u_loc, pfx, pfy, pfz);
 
     const SpeciesInfo sp = get_species_info(p.species[i]);
     if (sp.baryon_num == 0) return;
-    const double inv_A = 1.0 / static_cast<double>(sp.baryon_num);
-    const double qx = p.px[i] * inv_A - pfx;
-    const double qy = p.py[i] * inv_A - pfy;
-    const double qz = p.pz[i] * inv_A - pfz;
-    const double q2 = qx * qx + qy * qy + qz * qz;
-    const double inv_lam2 = 1.0 / (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
-    const double contrib = static_cast<double>(sp.baryon_num) * norm_inv_n_dV_rho0 / (1.0 + q2 * inv_lam2);
+    const Real inv_A = Real(1) / static_cast<Real>(sp.baryon_num);
+    const Real qx = p.px[i] * inv_A - pfx;
+    const Real qy = p.py[i] * inv_A - pfy;
+    const Real qz = p.pz[i] * inv_A - pfz;
+    const Real q2 = qx * qx + qy * qy + qz * qz;
+    const Real lam = static_cast<Real>(mf.cfg.Lambda_md_gev);
+    const Real inv_lam2 = Real(1) / (lam * lam);
+    const Real contrib = static_cast<Real>(sp.baryon_num) * norm_inv_n_dV_rho0 / (Real(1) + q2 * inv_lam2);
 
     for (int dz = 0; dz <= 1; ++dz) {
         const int iz = wrap_or_clamp_idx(k0 + dz, mf.gcfg.nz, mf.gcfg.boundary);
-        const double wz = (dz == 0) ? (1.0 - fz) : fz;
+        const Real wz = (dz == 0) ? (Real(1) - fz) : fz;
         for (int dy = 0; dy <= 1; ++dy) {
             const int iy = wrap_or_clamp_idx(j0 + dy, mf.gcfg.ny, mf.gcfg.boundary);
-            const double wy = (dy == 0) ? (1.0 - fy) : fy;
+            const Real wy = (dy == 0) ? (Real(1) - fy) : fy;
             for (int dx = 0; dx <= 1; ++dx) {
                 const int ix = wrap_or_clamp_idx(i0 + dx, mf.gcfg.nx, mf.gcfg.boundary);
-                const double w = ((dx == 0) ? (1.0 - fx) : fx) * wy * wz;
-                portable_atomic_add_real(&mf.psi_md[cell_flat(ix, iy, iz, mf.gcfg)], static_cast<Real>(w * contrib));
+                const Real w = ((dx == 0) ? (Real(1) - fx) : fx) * wy * wz;
+                portable_atomic_add_real(&mf.psi_md[cell_flat(ix, iy, iz, mf.gcfg)], w * contrib);
             }
         }
     }
@@ -427,28 +439,30 @@ HD_INLINE void smooth_axis_cell(const FieldT* src, FieldT* dst, int cid,
 }
 
 HD_INLINE void eval_node_potentials(MeanFieldView& mf, int c) {
-    const double rp = mf.rho_p[c];
-    const double rn = mf.rho_n[c];
-    const double rb = rp + rn;
-    if (rb <= 1.0e-12) {
+    const Real rp = mf.rho_p[c];
+    const Real rn = mf.rho_n[c];
+    const Real rb = rp + rn;
+    if (rb <= Real(1.0e-12)) {
         mf.u_loc_p[c] = Real(0);
         mf.u_loc_n[c] = Real(0);
         mf.u_md_dual[c] = Real(0);
         return;
     }
-    const double u = rb / mf.cfg.rho0_fm3;
-    const double delta = (rn - rp) / rb;
-    const double u_sk = mf.cfg.A_sk_gev * u + mf.cfg.B_sk_gev * ::pow(u, mf.cfg.sigma_exp);
-    const double u_sym = 2.0 * mf.cfg.S_pot_gev * ::pow(u, mf.cfg.gamma_sym) * delta;
-    const double u_md_bg = 0.5 * mf.cfg.C_md_gev * static_cast<double>(mf.psi_md[c]);
+    const Real u = rb / static_cast<Real>(mf.cfg.rho0_fm3);
+    const Real delta = (rn - rp) / rb;
+    const Real u_sk = static_cast<Real>(mf.cfg.A_sk_gev) * u +
+                      static_cast<Real>(mf.cfg.B_sk_gev) * std::pow(u, static_cast<Real>(mf.cfg.sigma_exp));
+    const Real u_sym = Real(2) * static_cast<Real>(mf.cfg.S_pot_gev) *
+                       std::pow(u, static_cast<Real>(mf.cfg.gamma_sym)) * delta;
+    const Real u_md_bg = Real(0.5) * static_cast<Real>(mf.cfg.C_md_gev) * mf.psi_md[c];
 
-    mf.u_loc_p[c] = static_cast<Real>(u_sk - u_sym + u_md_bg);
-    mf.u_loc_n[c] = static_cast<Real>(u_sk + u_sym + u_md_bg);
-    mf.u_md_dual[c] = static_cast<Real>(0.5 * mf.cfg.C_md_gev * u);
+    mf.u_loc_p[c] = u_sk - u_sym + u_md_bg;
+    mf.u_loc_n[c] = u_sk + u_sym + u_md_bg;
+    mf.u_md_dual[c] = Real(0.5) * static_cast<Real>(mf.cfg.C_md_gev) * u;
 }
 
 // Symplectic momentum kick dp/dt = -grad_r U_cluster(A, Z, r, p) - Q * grad_r Phi_Coul(r) over dt
-HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
+HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, Real dt,
                                     const MeanFieldView& mf, double loc_cm[4]) {
     loc_cm[0] = 0.0; loc_cm[1] = 0.0; loc_cm[2] = 0.0; loc_cm[3] = 0.0;
     if (!p.active[i]) return;
@@ -457,25 +471,25 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
     const bool do_coul = mf.cfg.coulomb_enabled && (sp.charge != 0);
     if (!do_nuc && !do_coul) return;
 
-    const double x = p.x[i], y = p.y[i], z = p.z[i];
-    double fx = 0.0, fy = 0.0, fz = 0.0;
+    const Real x = p.x[i], y = p.y[i], z = p.z[i];
+    Real fx = Real(0), fy = Real(0), fz = Real(0);
 
     if (do_coul) {
-        double gcx = 0.0, gcy = 0.0, gcz = 0.0;
+        Real gcx = Real(0), gcy = Real(0), gcz = Real(0);
         sample_cic_grad(mf.phi_coul, x, y, z, mf.gcfg, gcx, gcy, gcz);
-        const double Q = static_cast<double>(sp.charge);
+        const Real Q = static_cast<Real>(sp.charge);
         fx -= Q * gcx;
         fy -= Q * gcy;
         fz -= Q * gcz;
     }
 
     if (do_nuc) {
-        double Z = 0.0, N = 0.0;
+        Real Z = Real(0), N = Real(0);
         get_effective_pn_weights(p.species[i], Z, N);
-        const double A = static_cast<double>(sp.baryon_num);
+        const Real A = static_cast<Real>(sp.baryon_num);
 
-        double gpx = 0.0, gpy = 0.0, gpz = 0.0;
-        double gnx = 0.0, gny = 0.0, gnz = 0.0;
+        Real gpx = Real(0), gpy = Real(0), gpz = Real(0);
+        Real gnx = Real(0), gny = Real(0), gnz = Real(0);
         sample_cic_grad(mf.u_loc_p, x, y, z, mf.gcfg, gpx, gpy, gpz);
         sample_cic_grad(mf.u_loc_n, x, y, z, mf.gcfg, gnx, gny, gnz);
 
@@ -483,41 +497,42 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
         fy += -Z * gpy - N * gny;
         fz += -Z * gpz - N * gnz;
 
-        if (::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
-            double u_loc, pfx, pfy, pfz;
+        if (std::fabs(static_cast<Real>(mf.cfg.C_md_gev)) > Real(1.0e-12)) {
+            Real u_loc, pfx, pfy, pfz;
             sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
-            double gmdx, gmdy, gmdz;
+            Real gmdx, gmdy, gmdz;
             sample_cic_grad(mf.u_md_dual, x, y, z, mf.gcfg, gmdx, gmdy, gmdz);
 
-            const double qx = p.px[i] / A - pfx;
-            const double qy = p.py[i] / A - pfy;
-            const double qz = p.pz[i] / A - pfz;
-            const double inv_lam2 = 1.0 / (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
-            const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2;
-            const double md_coef = -A / denom;
+            const Real inv_A = Real(1) / A;
+            const Real qx = p.px[i] * inv_A - pfx;
+            const Real qy = p.py[i] * inv_A - pfy;
+            const Real qz = p.pz[i] * inv_A - pfz;
+            const Real lam = static_cast<Real>(mf.cfg.Lambda_md_gev);
+            const Real inv_lam2 = Real(1) / (lam * lam);
+            const Real denom = Real(1) + (qx * qx + qy * qy + qz * qz) * inv_lam2;
+            const Real md_coef = -A / denom;
             fx += md_coef * gmdx;
             fy += md_coef * gmdy;
             fz += md_coef * gmdz;
 
-            // Product-rule force from spatial variation of local collective frame p_f(r) = Pi(r)/rho_B(r)
-            const double rho_loc = u_loc * mf.cfg.rho0_fm3;
-            if (rho_loc > 1.0e-4) {
-                const double u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
-                double grpx, grpy, grpz, grnx, grny, grnz;
+            const Real rho_loc = u_loc * static_cast<Real>(mf.cfg.rho0_fm3);
+            if (rho_loc > Real(1.0e-4)) {
+                const Real u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
+                Real grpx, grpy, grpz, grnx, grny, grnz;
                 sample_cic_grad(mf.rho_p, x, y, z, mf.gcfg, grpx, grpy, grpz);
                 sample_cic_grad(mf.rho_n, x, y, z, mf.gcfg, grnx, grny, grnz);
-                const double grx = grpx + grnx, gry = grpy + grny, grz = grpz + grnz;
+                const Real grx = grpx + grnx, gry = grpy + grny, grz = grpz + grnz;
 
-                double gpix_x, gpix_y, gpix_z, gpiy_x, gpiy_y, gpiy_z, gpiz_x, gpiz_y, gpiz_z;
+                Real gpix_x, gpix_y, gpix_z, gpiy_x, gpiy_y, gpiy_z, gpiz_x, gpiz_y, gpiz_z;
                 sample_cic_grad(mf.px_sum, x, y, z, mf.gcfg, gpix_x, gpix_y, gpix_z);
                 sample_cic_grad(mf.py_sum, x, y, z, mf.gcfg, gpiy_x, gpiy_y, gpiy_z);
                 sample_cic_grad(mf.pz_sum, x, y, z, mf.gcfg, gpiz_x, gpiz_y, gpiz_z);
 
-                const double inv_rho = 1.0 / rho_loc;
-                const double q_dpf_dx = (qx * (gpix_x - pfx * grx) + qy * (gpiy_x - pfy * grx) + qz * (gpiz_x - pfz * grx)) * inv_rho;
-                const double q_dpf_dy = (qx * (gpix_y - pfx * gry) + qy * (gpiy_y - pfy * gry) + qz * (gpiz_y - pfz * gry)) * inv_rho;
-                const double q_dpf_dz = (qx * (gpix_z - pfx * grz) + qy * (gpiy_z - pfy * grz) + qz * (gpiz_z - pfz * grz)) * inv_rho;
-                const double pf_coef = -(2.0 * A * u_dual * inv_lam2) / (denom * denom);
+                const Real inv_rho = Real(1) / rho_loc;
+                const Real q_dpf_dx = (qx * (gpix_x - pfx * grx) + qy * (gpiy_x - pfy * grx) + qz * (gpiz_x - pfz * grx)) * inv_rho;
+                const Real q_dpf_dy = (qx * (gpix_y - pfx * gry) + qy * (gpiy_y - pfy * gry) + qz * (gpiz_y - pfz * gry)) * inv_rho;
+                const Real q_dpf_dz = (qx * (gpix_z - pfx * grz) + qy * (gpiy_z - pfy * grz) + qz * (gpiz_z - pfz * grz)) * inv_rho;
+                const Real pf_coef = -(Real(2) * A * u_dual * inv_lam2) / (denom * denom);
                 fx += pf_coef * q_dpf_dx;
                 fy += pf_coef * q_dpf_dy;
                 fz += pf_coef * q_dpf_dz;
@@ -525,75 +540,74 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, double dt,
         }
     }
 
-    const double dpx = fx * dt;
-    const double dpy = fy * dt;
-    const double dpz = fz * dt;
-    const double inv_fo = (p.freezeout_tag[i] > 1) ? (1.0 / static_cast<double>(p.freezeout_tag[i])) : 1.0;
-    const double w_cm = static_cast<double>(p.mass[i]) * inv_fo;
+    const Real dpx = fx * dt;
+    const Real dpy = fy * dt;
+    const Real dpz = fz * dt;
+    const Real inv_fo = (p.freezeout_tag[i] > 1) ? (Real(1) / static_cast<Real>(p.freezeout_tag[i])) : Real(1);
     p.px[i] += dpx;
     p.py[i] += dpy;
     p.pz[i] += dpz;
-    loc_cm[0] = dpx * inv_fo;
-    loc_cm[1] = dpy * inv_fo;
-    loc_cm[2] = dpz * inv_fo;
-    loc_cm[3] = w_cm;
+    loc_cm[0] = static_cast<double>(dpx * inv_fo);
+    loc_cm[1] = static_cast<double>(dpy * inv_fo);
+    loc_cm[2] = static_cast<double>(dpz * inv_fo);
+    loc_cm[3] = static_cast<double>(p.mass[i] * inv_fo);
 }
 
-// Subtract spurious discrete-lattice net impulse proportional to mass so total 3-momentum is exact to ~1e-14
+// Subtract spurious discrete-lattice net impulse proportional to mass so total 3-momentum is exact
 HD_INLINE void remove_lattice_cm_impulse(ParticleSoAView& p, int i, const MeanFieldConfig& cfg,
-                                         double corr_x, double corr_y, double corr_z) {
+                                         Real corr_x, Real corr_y, Real corr_z) {
     if (!p.active[i]) return;
     const SpeciesInfo sp = get_species_info(p.species[i]);
     const bool do_nuc = cfg.enabled && (p.freezeout_tag[i] == 0) && (sp.baryon_num > 0);
     const bool do_coul = cfg.coulomb_enabled && (sp.charge != 0);
     if (!do_nuc && !do_coul) return;
-    const double w_cm = static_cast<double>(p.mass[i]);
-    p.px[i] -= w_cm * corr_x;
-    p.py[i] -= w_cm * corr_y;
-    p.pz[i] -= w_cm * corr_z;
-    const double m = p.mass[i];
-    p.E[i] = ::sqrt(m * m + p.px[i] * p.px[i] + p.py[i] * p.py[i] + p.pz[i] * p.pz[i]);
+    const Real m = p.mass[i];
+    p.px[i] -= m * corr_x;
+    p.py[i] -= m * corr_y;
+    p.pz[i] -= m * corr_z;
+    p.E[i] = std::sqrt(m * m + p.px[i] * p.px[i] + p.py[i] * p.py[i] + p.pz[i] * p.pz[i]);
 }
 
 // Symplectic coordinate drift dx/dt = p/E + dU_MD/dp (includes m* < m group-velocity boost!)
-HD_INLINE void drift_particle_vlasov(ParticleSoAView& p, int i, double dt, const MeanFieldView& mf) {
+HD_INLINE void drift_particle_vlasov(ParticleSoAView& p, int i, Real dt, const MeanFieldView& mf) {
     if (!p.active[i]) return;
-    const double inv_E = 1.0 / p.E[i];
-    double vx = p.px[i] * inv_E;
-    double vy = p.py[i] * inv_E;
-    double vz = p.pz[i] * inv_E;
+    const Real inv_E = Real(1) / p.E[i];
+    Real vx = p.px[i] * inv_E;
+    Real vy = p.py[i] * inv_E;
+    Real vz = p.pz[i] * inv_E;
 
     const int bnum = get_species_info(p.species[i]).baryon_num;
-    if (bnum > 0 && p.freezeout_tag[i] == 0 && mf.cfg.enabled && ::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
-        double u_loc, pfx, pfy, pfz;
+    if (bnum > 0 && p.freezeout_tag[i] == 0 && mf.cfg.enabled &&
+        std::fabs(static_cast<Real>(mf.cfg.C_md_gev)) > Real(1.0e-12)) {
+        Real u_loc, pfx, pfy, pfz;
         sample_cic_flow_and_u(mf, p.x[i], p.y[i], p.z[i], u_loc, pfx, pfy, pfz);
-        const double A = static_cast<double>(bnum);
-        const double qx = p.px[i] / A - pfx;
-        const double qy = p.py[i] / A - pfy;
-        const double qz = p.pz[i] / A - pfz;
-        const double inv_lam2 = 1.0 / (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
-        const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) * inv_lam2;
-        const double dv_coef = -(mf.cfg.C_md_gev * u_loc * inv_lam2) / (denom * denom);
+        const Real inv_A = Real(1) / static_cast<Real>(bnum);
+        const Real qx = p.px[i] * inv_A - pfx;
+        const Real qy = p.py[i] * inv_A - pfy;
+        const Real qz = p.pz[i] * inv_A - pfz;
+        const Real lam = static_cast<Real>(mf.cfg.Lambda_md_gev);
+        const Real inv_lam2 = Real(1) / (lam * lam);
+        const Real denom = Real(1) + (qx * qx + qy * qy + qz * qz) * inv_lam2;
+        const Real dv_coef = -(static_cast<Real>(mf.cfg.C_md_gev) * u_loc * inv_lam2) / (denom * denom);
 
         vx += dv_coef * qx;
         vy += dv_coef * qy;
         vz += dv_coef * qz;
 
-        // Causality limiter |v_eff| <= 0.9995 c
-        const double v2 = vx * vx + vy * vy + vz * vz;
-        if (v2 > 0.9990) {
-            const double scale = 0.9995 / ::sqrt(v2);
+        const Real v2 = vx * vx + vy * vy + vz * vz;
+        if (v2 > Real(0.9990)) {
+            const Real scale = Real(0.9995) / std::sqrt(v2);
             vx *= scale; vy *= scale; vz *= scale;
         }
     }
 
-    double nx = p.x[i] + vx * dt;
-    double ny = p.y[i] + vy * dt;
-    double nz = p.z[i] + vz * dt;
+    Real nx = p.x[i] + vx * dt;
+    Real ny = p.y[i] + vy * dt;
+    Real nz = p.z[i] + vz * dt;
     if (mf.gcfg.boundary == BoundaryMode::PeriodicBox) {
-        nx = detail::wrap_periodic(nx, mf.gcfg.xmin, mf.gcfg.lx());
-        ny = detail::wrap_periodic(ny, mf.gcfg.ymin, mf.gcfg.ly());
-        nz = detail::wrap_periodic(nz, mf.gcfg.zmin, mf.gcfg.lz());
+        nx = detail::wrap_periodic(nx, static_cast<Real>(mf.gcfg.xmin), static_cast<Real>(mf.gcfg.lx()));
+        ny = detail::wrap_periodic(ny, static_cast<Real>(mf.gcfg.ymin), static_cast<Real>(mf.gcfg.ly()));
+        nz = detail::wrap_periodic(nz, static_cast<Real>(mf.gcfg.zmin), static_cast<Real>(mf.gcfg.lz()));
     }
     p.x[i] = nx;
     p.y[i] = ny;
@@ -602,85 +616,85 @@ HD_INLINE void drift_particle_vlasov(ParticleSoAView& p, int i, double dt, const
 }
 
 // Single-particle potential U_i(r, p) = dE_pot / df_i [GeV] matching compute_potential_energy_test_gev
-HD_INLINE double eval_particle_potential_gev(const MeanFieldView& mf,
-                                             int species_id,
-                                             double x, double y, double z,
-                                             double px, double py, double pz) {
+HD_INLINE Real eval_particle_potential_gev(const MeanFieldView& mf,
+                                           int species_id,
+                                           Real x, Real y, Real z,
+                                           Real px, Real py, Real pz) {
     const SpeciesInfo sp = get_species_info(species_id);
-    double u_tot = 0.0;
+    Real u_tot = Real(0);
     if (mf.cfg.coulomb_enabled && sp.charge != 0 && mf.phi_coul != nullptr) {
-        u_tot += static_cast<double>(sp.charge) * sample_cic_scalar(mf.phi_coul, x, y, z, mf.gcfg);
+        u_tot += static_cast<Real>(sp.charge) * sample_cic_scalar(mf.phi_coul, x, y, z, mf.gcfg);
     }
     if (!mf.cfg.enabled || sp.baryon_num == 0) return u_tot;
-    double Z = 0.0, N = 0.0;
+    Real Z = Real(0), N = Real(0);
     get_effective_pn_weights(species_id, Z, N);
-    const double A = static_cast<double>(sp.baryon_num);
+    const Real A = static_cast<Real>(sp.baryon_num);
 
     u_tot += Z * sample_cic_scalar(mf.u_loc_p, x, y, z, mf.gcfg) +
              N * sample_cic_scalar(mf.u_loc_n, x, y, z, mf.gcfg);
-    if (::fabs(mf.cfg.C_md_gev) > 1.0e-12) {
-        double u_loc, pfx, pfy, pfz;
+    if (std::fabs(static_cast<Real>(mf.cfg.C_md_gev)) > Real(1.0e-12)) {
+        Real u_loc, pfx, pfy, pfz;
         sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
-        const double u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
-        const double qx = px / A - pfx;
-        const double qy = py / A - pfy;
-        const double qz = pz / A - pfz;
-        const double denom = 1.0 + (qx * qx + qy * qy + qz * qz) /
-                                   (mf.cfg.Lambda_md_gev * mf.cfg.Lambda_md_gev);
+        const Real u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
+        const Real inv_A = Real(1) / A;
+        const Real qx = px * inv_A - pfx;
+        const Real qy = py * inv_A - pfy;
+        const Real qz = pz * inv_A - pfz;
+        const Real lam = static_cast<Real>(mf.cfg.Lambda_md_gev);
+        const Real denom = Real(1) + (qx * qx + qy * qy + qz * qz) / (lam * lam);
         u_tot += (A * u_dual) / denom;
     }
     return u_tot;
 }
 
 // Solve omega_3(r3, p3(q)) + omega_4(r4, p4(q)) == omega_target with exact p3(q) + p4(q) == P
-HD_INLINE bool solve_in_medium_2body_momenta(const MeanFieldView& mf,
-                                             int id3, double m3, double x3, double y3, double z3,
-                                             int id4, double m4, double x4, double y4, double z4,
-                                             double Px, double Py, double Pz,
-                                             double nx, double ny, double nz,
-                                             double q_vac_guess, double omega_target,
+HD_FUNC bool solve_in_medium_2body_momenta(const MeanFieldView& mf,
+                                             int id3, Real m3, Real x3, Real y3, Real z3,
+                                             int id4, Real m4, Real x4, Real y4, Real z4,
+                                             Real Px, Real Py, Real Pz,
+                                             Real nx, Real ny, Real nz,
+                                             Real q_vac_guess, Real omega_target,
                                              Real& E3, Real& p3x, Real& p3y, Real& p3z,
                                              Real& E4, Real& p4x, Real& p4y, Real& p4z) {
-    const double P2 = Px * Px + Py * Py + Pz * Pz;
-    auto eval_q = [&](double q) {
-        const double e3s = ::sqrt(m3 * m3 + q * q);
-        const double e4s = ::sqrt(m4 * m4 + q * q);
-        const double W = e3s + e4s;
-        const double inv_W = 1.0 / W;
-        const double ux = Px * inv_W, uy = Py * inv_W, uz = Pz * inv_W;
-        const double gam = ::sqrt(1.0 + P2 * inv_W * inv_W);
-        const double qnx = q * nx, qny = q * ny, qnz = q * nz;
-        const double alpha = (ux * qnx + uy * qny + uz * qnz) / (1.0 + gam);
-        const double d3x = qnx + (alpha + e3s) * ux, d3y = qny + (alpha + e3s) * uy, d3z = qnz + (alpha + e3s) * uz;
-        const double d4x = -qnx + (-alpha + e4s) * ux, d4y = -qny + (-alpha + e4s) * uy, d4z = -qnz + (-alpha + e4s) * uz;
-        const double dE3 = ::sqrt(m3 * m3 + d3x * d3x + d3y * d3y + d3z * d3z);
-        const double dE4 = ::sqrt(m4 * m4 + d4x * d4x + d4y * d4y + d4z * d4z);
-        E3 = static_cast<Real>(dE3); p3x = static_cast<Real>(d3x); p3y = static_cast<Real>(d3y); p3z = static_cast<Real>(d3z);
-        E4 = static_cast<Real>(dE4); p4x = static_cast<Real>(d4x); p4y = static_cast<Real>(d4y); p4z = static_cast<Real>(d4z);
+    const Real P2 = Px * Px + Py * Py + Pz * Pz;
+    auto eval_q = [&](Real q) -> Real {
+        const Real e3s = std::sqrt(m3 * m3 + q * q);
+        const Real e4s = std::sqrt(m4 * m4 + q * q);
+        const Real inv_W = Real(1) / (e3s + e4s);
+        const Real ux = Px * inv_W, uy = Py * inv_W, uz = Pz * inv_W;
+        const Real gam = std::sqrt(Real(1) + P2 * inv_W * inv_W);
+        const Real qnx = q * nx, qny = q * ny, qnz = q * nz;
+        const Real alpha = (ux * qnx + uy * qny + uz * qnz) / (Real(1) + gam);
+        const Real d3x = qnx + (alpha + e3s) * ux, d3y = qny + (alpha + e3s) * uy, d3z = qnz + (alpha + e3s) * uz;
+        const Real d4x = -qnx + (-alpha + e4s) * ux, d4y = -qny + (-alpha + e4s) * uy, d4z = -qnz + (-alpha + e4s) * uz;
+        const Real dE3 = std::sqrt(m3 * m3 + d3x * d3x + d3y * d3y + d3z * d3z);
+        const Real dE4 = std::sqrt(m4 * m4 + d4x * d4x + d4y * d4y + d4z * d4z);
+        E3 = dE3; p3x = d3x; p3y = d3y; p3z = d3z;
+        E4 = dE4; p4x = d4x; p4y = d4y; p4z = d4z;
         return (dE3 + eval_particle_potential_gev(mf, id3, x3, y3, z3, d3x, d3y, d3z)) +
                (dE4 + eval_particle_potential_gev(mf, id4, x4, y4, z4, d4x, d4y, d4z)) - omega_target;
     };
 
-    double q_lo = 0.0, f_lo = eval_q(0.0);
-    if (f_lo > 0.0) return false;
-    double q_hi = (q_vac_guess > 0.02 ? q_vac_guess : 0.02) + 0.25;
-    double f_hi = eval_q(q_hi);
-    for (int b = 0; b < 6 && f_hi < 0.0; ++b) { q_hi *= 2.0; f_hi = eval_q(q_hi); }
-    if (f_hi < 0.0) return false;
+    Real q_lo = Real(0), f_lo = eval_q(Real(0));
+    if (f_lo > Real(0)) return false;
+    Real q_hi = (q_vac_guess > Real(0.02) ? q_vac_guess : Real(0.02)) + Real(0.25);
+    Real f_hi = eval_q(q_hi);
+    for (int b = 0; b < 6 && f_hi < Real(0); ++b) { q_hi *= Real(2); f_hi = eval_q(q_hi); }
+    if (f_hi < Real(0)) return false;
 
-    double q_cur = (q_vac_guess > 0.0 && q_vac_guess < q_hi) ? q_vac_guess : 0.5 * q_hi;
-    constexpr double f_tol = (sizeof(Real) == 4) ? 2.0e-6 : 1.0e-13;
-    constexpr double q_tol = (sizeof(Real) == 4) ? 1.0e-6 : 1.0e-13;
+    Real q_cur = (q_vac_guess > Real(0) && q_vac_guess < q_hi) ? q_vac_guess : Real(0.5) * q_hi;
+    constexpr Real f_tol = (sizeof(Real) == 4) ? Real(1.0e-5) : static_cast<Real>(1.0e-13);
+    constexpr Real q_tol = (sizeof(Real) == 4) ? Real(5.0e-6) : static_cast<Real>(1.0e-13);
     for (int it = 0; it < 14; ++it) {
-        const double f_cur = eval_q(q_cur);
-        if (::fabs(f_cur) < f_tol || (q_hi - q_lo) < q_tol) return true;
-        if (f_cur < 0.0) { q_lo = q_cur; f_lo = f_cur; } else { q_hi = q_cur; f_hi = f_cur; }
-        const double df = f_hi - f_lo;
-        const double q_sec = (::fabs(df) > 1.0e-15) ? (q_lo - f_lo * (q_hi - q_lo) / df) : 0.5 * (q_lo + q_hi);
-        const double pad = 0.10 * (q_hi - q_lo);
-        q_cur = (q_sec > q_lo + pad && q_sec < q_hi - pad) ? q_sec : 0.5 * (q_lo + q_hi);
+        const Real f_cur = eval_q(q_cur);
+        if (std::fabs(f_cur) < f_tol || (q_hi - q_lo) < q_tol) return true;
+        if (f_cur < Real(0)) { q_lo = q_cur; f_lo = f_cur; } else { q_hi = q_cur; f_hi = f_cur; }
+        const Real df = f_hi - f_lo;
+        const Real q_sec = (std::fabs(df) > Real(1.0e-15)) ? (q_lo - f_lo * (q_hi - q_lo) / df) : Real(0.5) * (q_lo + q_hi);
+        const Real pad = Real(0.10) * (q_hi - q_lo);
+        q_cur = (q_sec > q_lo + pad && q_sec < q_hi - pad) ? q_sec : Real(0.5) * (q_lo + q_hi);
     }
-    eval_q(0.5 * (q_lo + q_hi));
+    eval_q(Real(0.5) * (q_lo + q_hi));
     return true;
 }
 
@@ -719,12 +733,12 @@ HD_INLINE void scale_peculiar_momentum_particle(ParticleSoAView& p, int i,
 }
 
 #if TRANSPORT_HAS_CUDA
-__global__ void deposit_baryon_cic_kernel(ParticleSoAView p, double norm_inv, MeanFieldView mf) {
+__global__ void deposit_baryon_cic_kernel(ParticleSoAView p, Real norm_inv, MeanFieldView mf) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < p.n) deposit_particle_baryon_cic(p, i, norm_inv, mf);
 }
 
-__global__ void deposit_md_psi_cic_kernel(ParticleSoAView p, double norm_inv, MeanFieldView mf) {
+__global__ void deposit_md_psi_cic_kernel(ParticleSoAView p, Real norm_inv, MeanFieldView mf) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < p.n) deposit_particle_md_psi_cic(p, i, norm_inv, mf);
 }
@@ -739,7 +753,7 @@ __global__ void eval_potentials_kernel(MeanFieldView mf, int n_cells) {
     if (c < n_cells) eval_node_potentials(mf, c);
 }
 
-__global__ void kick_vlasov_kernel(ParticleSoAView p, double dt, MeanFieldView mf, double* cm_accum) {
+__global__ void kick_vlasov_kernel(ParticleSoAView p, Real dt, MeanFieldView mf, double* cm_accum) {
     __shared__ double s_cm[4][256];
     const int tid = threadIdx.x;
     const int i = blockIdx.x * blockDim.x + tid;
@@ -758,12 +772,12 @@ __global__ void kick_vlasov_kernel(ParticleSoAView p, double dt, MeanFieldView m
     }
 }
 
-__global__ void remove_cm_impulse_kernel(ParticleSoAView p, MeanFieldConfig cfg, double cx, double cy, double cz) {
+__global__ void remove_cm_impulse_kernel(ParticleSoAView p, MeanFieldConfig cfg, Real cx, Real cy, Real cz) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < p.n) remove_lattice_cm_impulse(p, i, cfg, cx, cy, cz);
 }
 
-__global__ void drift_vlasov_kernel(ParticleSoAView p, double dt, MeanFieldView mf) {
+__global__ void drift_vlasov_kernel(ParticleSoAView p, Real dt, MeanFieldView mf) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < p.n) drift_particle_vlasov(p, i, dt, mf);
 }
@@ -840,7 +854,7 @@ public:
         ParticleSoAView pv = particles.view();
         MeanFieldView mfv = view();
         mfv.cfg.coulomb_enabled = do_coul;
-        const double inv_n_dV = 1.0 / (static_cast<double>(n_test) * gcfg_.cell_volume_fm3());
+        const Real inv_n_dV = static_cast<Real>(1.0 / (static_cast<double>(n_test) * gcfg_.cell_volume_fm3()));
 
 #if TRANSPORT_HAS_CUDA
         constexpr int TPB = 256;
@@ -863,7 +877,7 @@ public:
 
             if (std::fabs(cfg_.C_md_gev) > 1.0e-12) {
                 mfv = view();
-                const double inv_md = inv_n_dV / cfg_.rho0_fm3;
+                const Real inv_md = inv_n_dV / static_cast<Real>(cfg_.rho0_fm3);
 #if TRANSPORT_HAS_CUDA
                 mf_detail::deposit_md_psi_cic_kernel<<<p_blocks, TPB>>>(pv, inv_md, mfv);
                 CUDA_CHECK(cudaGetLastError());
@@ -912,28 +926,32 @@ public:
         if (np == 0) return;
         ParticleSoAView pv = particles.view();
         MeanFieldView mfv = view();
+        const Real dt_r = static_cast<Real>(dt);
         cm_accum_.zero();
 #if TRANSPORT_HAS_CUDA
         constexpr int TPB = 256;
         const int p_blocks = (np + TPB - 1) / TPB;
-        mf_detail::kick_vlasov_kernel<<<p_blocks, TPB>>>(pv, dt, mfv, cm_accum_.data());
+        mf_detail::kick_vlasov_kernel<<<p_blocks, TPB>>>(pv, dt_r, mfv, cm_accum_.data());
         CUDA_CHECK(cudaGetLastError());
         double h_cm[4] = {};
         cm_accum_.copy_to_host(h_cm, 4);
         const double inv_W = (h_cm[3] > 0.0) ? (1.0 / h_cm[3]) : 0.0;
         mf_detail::remove_cm_impulse_kernel<<<p_blocks, TPB>>>(
-            pv, cfg_, h_cm[0] * inv_W, h_cm[1] * inv_W, h_cm[2] * inv_W);
+            pv, cfg_, static_cast<Real>(h_cm[0] * inv_W), static_cast<Real>(h_cm[1] * inv_W),
+            static_cast<Real>(h_cm[2] * inv_W));
         CUDA_CHECK(cudaGetLastError());
 #else
         double* cm = cm_accum_.data();
         for (int i = 0; i < np; ++i) {
             double loc_cm[4];
-            mf_detail::kick_particle_vlasov(pv, i, dt, mfv, loc_cm);
+            mf_detail::kick_particle_vlasov(pv, i, dt_r, mfv, loc_cm);
             for (int k = 0; k < 4; ++k) cm[k] += loc_cm[k];
         }
         const double inv_W = (cm[3] > 0.0) ? (1.0 / cm[3]) : 0.0;
         for (int i = 0; i < np; ++i) {
-            mf_detail::remove_lattice_cm_impulse(pv, i, cfg_, cm[0] * inv_W, cm[1] * inv_W, cm[2] * inv_W);
+            mf_detail::remove_lattice_cm_impulse(
+                pv, i, cfg_, static_cast<Real>(cm[0] * inv_W), static_cast<Real>(cm[1] * inv_W),
+                static_cast<Real>(cm[2] * inv_W));
         }
 #endif
     }
@@ -943,12 +961,13 @@ public:
         if (np == 0) return;
         ParticleSoAView pv = particles.view();
         MeanFieldView mfv = view();
+        const Real dt_r = static_cast<Real>(dt);
 #if TRANSPORT_HAS_CUDA
         constexpr int TPB = 256;
-        mf_detail::drift_vlasov_kernel<<<(np + TPB - 1) / TPB, TPB>>>(pv, dt, mfv);
+        mf_detail::drift_vlasov_kernel<<<(np + TPB - 1) / TPB, TPB>>>(pv, dt_r, mfv);
         CUDA_CHECK(cudaGetLastError());
 #else
-        for (int i = 0; i < np; ++i) mf_detail::drift_particle_vlasov(pv, i, dt, mfv);
+        for (int i = 0; i < np; ++i) mf_detail::drift_particle_vlasov(pv, i, dt_r, mfv);
 #endif
     }
 

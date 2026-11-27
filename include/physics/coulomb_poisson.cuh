@@ -63,46 +63,51 @@ inline void build_1d_laplacian_eigenbasis(int N, double dx, BoundaryMode bmode,
 
 // Exterior multipole electrostatic potential (l = 0, 1, 2) [GeV] around box center r0
 // m[0] = Q, m[1..3] = D_x, D_y, D_z, m[4..9] = Q_xx, Q_xy, Q_xz, Q_yy, Q_yz, Q_zz
-HD_INLINE double eval_multipole_potential_gev(double rx, double ry, double rz, const double* m) {
-    const double r2 = rx * rx + ry * ry + rz * rz;
-    if (r2 <= 1.0e-12) return 0.0;
-    const double inv_r = 1.0 / ::sqrt(r2);
-    const double inv_r2 = inv_r * inv_r;
-    const double inv_r3 = inv_r2 * inv_r;
-    const double inv_r5 = inv_r3 * inv_r2;
-    const double mono = m[0] * inv_r;
-    const double dip = (m[1] * rx + m[2] * ry + m[3] * rz) * inv_r3;
-    const double quad_rr = m[4] * rx * rx + m[7] * ry * ry + m[9] * rz * rz +
-                           2.0 * (m[5] * rx * ry + m[6] * rx * rz + m[8] * ry * rz);
-    return phys::E2_COULOMB_GEV_FM * (mono + dip + 0.5 * quad_rr * inv_r5);
+template <typename T>
+HD_INLINE T eval_multipole_potential_gev(T rx, T ry, T rz, const T* m) {
+    const T r2 = rx * rx + ry * ry + rz * rz;
+    if (r2 <= T(1.0e-12)) return T(0);
+    const T inv_r = T(1) / std::sqrt(r2);
+    const T inv_r2 = inv_r * inv_r;
+    const T inv_r3 = inv_r2 * inv_r;
+    const T inv_r5 = inv_r3 * inv_r2;
+    const T mono = m[0] * inv_r;
+    const T dip = (m[1] * rx + m[2] * ry + m[3] * rz) * inv_r3;
+    const T quad_rr = m[4] * rx * rx + m[7] * ry * ry + m[9] * rz * rz +
+                      T(2) * (m[5] * rx * ry + m[6] * rx * rz + m[8] * ry * rz);
+    return static_cast<T>(phys::E2_COULOMB_GEV_FM) * (mono + dip + T(0.5) * quad_rr * inv_r5);
 }
 
 HD_INLINE bool eval_cell_multipoles(const Real* rho_q, int c, const GridConfig& g, double out_mp[10]) {
-    const double rq = static_cast<double>(rho_q[c]);
-    if (::fabs(rq) <= 1.0e-15) return false;
+    const Real rq = rho_q[c];
+    constexpr Real rq_eps = (sizeof(Real) == 4) ? Real(1.0e-12) : static_cast<Real>(1.0e-15);
+    if (std::fabs(rq) <= rq_eps) return false;
     const int ix = c % g.nx;
     const int iy = (c / g.nx) % g.ny;
     const int iz = c / (g.nx * g.ny);
-    const double dV = g.cell_volume_fm3();
-    const double x0 = 0.5 * (g.xmin + g.xmax);
-    const double y0 = 0.5 * (g.ymin + g.ymax);
-    const double z0 = 0.5 * (g.zmin + g.zmax);
-    const double rx = (g.xmin + (ix + 0.5) * g.dx()) - x0;
-    const double ry = (g.ymin + (iy + 0.5) * g.dy()) - y0;
-    const double rz = (g.zmin + (iz + 0.5) * g.dz()) - z0;
-    const double r2 = rx * rx + ry * ry + rz * rz;
-    const double q = rq * dV;
+    const Real dx = static_cast<Real>(g.dx());
+    const Real dy = static_cast<Real>(g.dy());
+    const Real dz = static_cast<Real>(g.dz());
+    const Real dV = dx * dy * dz;
+    const Real x0 = Real(0.5) * static_cast<Real>(g.xmin + g.xmax);
+    const Real y0 = Real(0.5) * static_cast<Real>(g.ymin + g.ymax);
+    const Real z0 = Real(0.5) * static_cast<Real>(g.zmin + g.zmax);
+    const Real rx = (static_cast<Real>(g.xmin) + (static_cast<Real>(ix) + Real(0.5)) * dx) - x0;
+    const Real ry = (static_cast<Real>(g.ymin) + (static_cast<Real>(iy) + Real(0.5)) * dy) - y0;
+    const Real rz = (static_cast<Real>(g.zmin) + (static_cast<Real>(iz) + Real(0.5)) * dz) - z0;
+    const Real r2 = rx * rx + ry * ry + rz * rz;
+    const Real q = rq * dV;
 
-    out_mp[0] = q;
-    out_mp[1] = q * rx;
-    out_mp[2] = q * ry;
-    out_mp[3] = q * rz;
-    out_mp[4] = q * (3.0 * rx * rx - r2);
-    out_mp[5] = q * (3.0 * rx * ry);
-    out_mp[6] = q * (3.0 * rx * rz);
-    out_mp[7] = q * (3.0 * ry * ry - r2);
-    out_mp[8] = q * (3.0 * ry * rz);
-    out_mp[9] = q * (3.0 * rz * rz - r2);
+    out_mp[0] = static_cast<double>(q);
+    out_mp[1] = static_cast<double>(q * rx);
+    out_mp[2] = static_cast<double>(q * ry);
+    out_mp[3] = static_cast<double>(q * rz);
+    out_mp[4] = static_cast<double>(q * (Real(3) * rx * rx - r2));
+    out_mp[5] = static_cast<double>(q * (Real(3) * rx * ry));
+    out_mp[6] = static_cast<double>(q * (Real(3) * rx * rz));
+    out_mp[7] = static_cast<double>(q * (Real(3) * ry * ry - r2));
+    out_mp[8] = static_cast<double>(q * (Real(3) * ry * rz));
+    out_mp[9] = static_cast<double>(q * (Real(3) * rz * rz - r2));
     return true;
 }
 
@@ -114,25 +119,34 @@ HD_INLINE void accum_cell_multipoles(const Real* rho_q, int c, const GridConfig&
 
 HD_INLINE void build_poisson_rhs_cell(const Real* rho_q, Real* rhs, int c,
                                       const GridConfig& g, const double* mp10) {
-    const double pref = 4.0 * phys::PI * phys::E2_COULOMB_GEV_FM;
-    double val = pref * static_cast<double>(rho_q[c]);
+    constexpr Real pref = static_cast<Real>(4.0 * phys::PI * phys::E2_COULOMB_GEV_FM);
+    Real val = pref * rho_q[c];
     if (g.boundary == BoundaryMode::OpenExpanding) {
         const int ix = c % g.nx;
         const int iy = (c / g.nx) % g.ny;
         const int iz = c / (g.nx * g.ny);
-        const double dx = g.dx(), dy = g.dy(), dz = g.dz();
-        const double rx = (g.xmin + (ix + 0.5) * dx) - 0.5 * (g.xmin + g.xmax);
-        const double ry = (g.ymin + (iy + 0.5) * dy) - 0.5 * (g.ymin + g.ymax);
-        const double rz = (g.zmin + (iz + 0.5) * dz) - 0.5 * (g.zmin + g.zmax);
+        if (ix == 0 || ix == g.nx - 1 || iy == 0 || iy == g.ny - 1 || iz == 0 || iz == g.nz - 1) {
+            Real m_r[10];
+            for (int k = 0; k < 10; ++k) m_r[k] = static_cast<Real>(mp10[k]);
+            const Real dx = static_cast<Real>(g.dx());
+            const Real dy = static_cast<Real>(g.dy());
+            const Real dz = static_cast<Real>(g.dz());
+            const Real inv_dx2 = Real(1) / (dx * dx);
+            const Real inv_dy2 = Real(1) / (dy * dy);
+            const Real inv_dz2 = Real(1) / (dz * dz);
+            const Real rx = (static_cast<Real>(g.xmin) + (static_cast<Real>(ix) + Real(0.5)) * dx) - Real(0.5) * static_cast<Real>(g.xmin + g.xmax);
+            const Real ry = (static_cast<Real>(g.ymin) + (static_cast<Real>(iy) + Real(0.5)) * dy) - Real(0.5) * static_cast<Real>(g.ymin + g.ymax);
+            const Real rz = (static_cast<Real>(g.zmin) + (static_cast<Real>(iz) + Real(0.5)) * dz) - Real(0.5) * static_cast<Real>(g.zmin + g.zmax);
 
-        if (ix == 0)        val += eval_multipole_potential_gev(rx - dx, ry, rz, mp10) / (dx * dx);
-        if (ix == g.nx - 1) val += eval_multipole_potential_gev(rx + dx, ry, rz, mp10) / (dx * dx);
-        if (iy == 0)        val += eval_multipole_potential_gev(rx, ry - dy, rz, mp10) / (dy * dy);
-        if (iy == g.ny - 1) val += eval_multipole_potential_gev(rx, ry + dy, rz, mp10) / (dy * dy);
-        if (iz == 0)        val += eval_multipole_potential_gev(rx, ry, rz - dz, mp10) / (dz * dz);
-        if (iz == g.nz - 1) val += eval_multipole_potential_gev(rx, ry, rz + dz, mp10) / (dz * dz);
+            if (ix == 0)        val += eval_multipole_potential_gev(rx - dx, ry, rz, m_r) * inv_dx2;
+            if (ix == g.nx - 1) val += eval_multipole_potential_gev(rx + dx, ry, rz, m_r) * inv_dx2;
+            if (iy == 0)        val += eval_multipole_potential_gev(rx, ry - dy, rz, m_r) * inv_dy2;
+            if (iy == g.ny - 1) val += eval_multipole_potential_gev(rx, ry + dy, rz, m_r) * inv_dy2;
+            if (iz == 0)        val += eval_multipole_potential_gev(rx, ry, rz - dz, m_r) * inv_dz2;
+            if (iz == g.nz - 1) val += eval_multipole_potential_gev(rx, ry, rz + dz, m_r) * inv_dz2;
+        }
     }
-    rhs[c] = static_cast<Real>(val);
+    rhs[c] = val;
 }
 
 // 1D matrix-tensor contraction along axis in {0, 1, 2} in Real precision (FP32 on GeForce GPUs!)

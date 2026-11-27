@@ -62,34 +62,34 @@ __global__ void reduce_observables_kernel(ParticleSoAView p,
 
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < p.n; i += blockDim.x * gridDim.x) {
         if (!p.active[i]) continue;
-        const double w_fo = (p.freezeout_tag[i] > 1)
-                                ? (1.0 / static_cast<double>(p.freezeout_tag[i]))
-                                : 1.0;
+        const Real w_fo = (p.freezeout_tag[i] > 1)
+                              ? (Real(1) / static_cast<Real>(p.freezeout_tag[i]))
+                              : Real(1);
 
-        const double E = p.E[i];
-        const double px = p.px[i];
-        const double py = p.py[i];
-        const double pz = p.pz[i];
-        const double m = p.mass[i];
-        const double inv_E = 1.0 / E;
+        const Real E = p.E[i];
+        const Real px = p.px[i];
+        const Real py = p.py[i];
+        const Real pz = p.pz[i];
+        const Real m = p.mass[i];
+        const Real inv_E = Real(1) / E;
         const int sp_id = p.species[i];
         const SpeciesInfo sp = get_species_info(sp_id);
 
-        lE += w_fo * E;
-        lPx += w_fo * px;
-        lPy += w_fo * py;
-        lPz += w_fo * pz;
-        lTxx += w_fo * px * px * inv_E;
-        lTyy += w_fo * py * py * inv_E;
-        lTzz += w_fo * pz * pz * inv_E;
-        lr2 += w_fo * (p.x[i] * p.x[i] + p.y[i] * p.y[i] + p.z[i] * p.z[i]);
-        lB += w_fo * static_cast<double>(sp.baryon_num);
-        lQ += w_fo * static_cast<double>(sp.charge);
+        lE += static_cast<double>(w_fo * E);
+        lPx += static_cast<double>(w_fo * px);
+        lPy += static_cast<double>(w_fo * py);
+        lPz += static_cast<double>(w_fo * pz);
+        lTxx += static_cast<double>(w_fo * px * px * inv_E);
+        lTyy += static_cast<double>(w_fo * py * py * inv_E);
+        lTzz += static_cast<double>(w_fo * pz * pz * inv_E);
+        lr2 += static_cast<double>(w_fo * (p.x[i] * p.x[i] + p.y[i] * p.y[i] + p.z[i] * p.z[i]));
+        lB += static_cast<double>(w_fo * static_cast<Real>(sp.baryon_num));
+        lQ += static_cast<double>(w_fo * static_cast<Real>(sp.charge));
         lAct += 1ULL;
 
         atomicAdd(&d_counts[sp_id], 1);
-        portable_atomic_add_double(&d_ke_sum[sp_id], w_fo * (E - m));
-        portable_atomic_add_double(&d_mass_sum[sp_id], m);
+        portable_atomic_add_double(&d_ke_sum[sp_id], static_cast<double>(w_fo * (E - m)));
+        portable_atomic_add_double(&d_mass_sum[sp_id], static_cast<double>(m));
     }
 
     portable_atomic_add_double(&sh_sc[0], lE);

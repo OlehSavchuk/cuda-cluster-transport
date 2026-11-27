@@ -12,8 +12,8 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### Full FOPI $\text{Au}+\text{Au}$ Excitation Benchmark ($0.09\text{–}1.50\,A\;\text{GeV}$, All 10 Energies, `FP32` $N_{\text{test}}=1000$ + $10\times$ Oversampling)
-Complete 10-energy FOPI $\text{Au}+\text{Au}$ excitation-function benchmark (`90, 120, 150, 250, 400, 600, 800, 1000, 1200, 1500` $A\;\text{MeV}$, `scripts/run_fopi_all_energies_gc_oversample.py`, `10` BUU runs/energy = `5` central $b_0 < 0.15$ + `5` semi-central $0.25 < b_0 < 0.45$ at `N_test = 1000`, `--sampling gc --fo-oversample 10 --backflow remelt --eos sm --pauli on --coulomb on --anisotropy on --max-cluster-A 6 --nfr 0.02`):
+### Full FOPI $\text{Au}+\text{Au}$ Excitation Benchmark ($0.09\text{–}1.50\,A\;\text{GeV}$, All 10 Energies: `SM` vs. `HM`, Native `FP32`, $N_{\text{test}}=1000$ + $10\times$ Oversampling)
+Complete 10-energy FOPI $\text{Au}+\text{Au}$ excitation-function benchmark (`90, 120, 150, 250, 400, 600, 800, 1000, 1200, 1500` $A\;\text{MeV}$, `scripts/run_fopi_all_energies_gc_oversample.py`, `200` total paired-seed BUU runs = `10` runs/energy/EoS [`5` central $b_0 < 0.15$ + `5` semi-central $0.25 < b_0 < 0.45$] comparing **`SM` (`md-soft`, $K_0 = 215\;\text{MeV}$)** vs. **`HM` (`md-stiff`, $K_0 = 380\;\text{MeV}$)** in native `FP32` at `N_test = 1000`, `--sampling gc --fo-oversample 10 --backflow remelt --pauli on --coulomb on --anisotropy on --max-cluster-A 6 --nfr 0.02`):
 
 <p align="center">
   <img src="assets/fopi_gc_oversample_all_energies_summary.png" alt="FOPI Au+Au 0.09-1.50 A GeV Excitation Functions Summary" width="100%">

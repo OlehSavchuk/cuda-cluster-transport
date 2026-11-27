@@ -35,30 +35,34 @@ struct PauliPhaseSpaceView {
     const float* f_n = nullptr;
 };
 
-HD_INLINE double eval_pauli_f(const PauliPhaseSpaceView& pv,
-                                       int sp_id,
-                                       double x, double y, double z,
-                                       double px, double py, double pz) {
-    if (!pv.cfg.enabled) return 0.0;
+HD_INLINE Real eval_pauli_f(const PauliPhaseSpaceView& pv,
+                            int sp_id,
+                            Real x, Real y, Real z,
+                            Real px, Real py, Real pz) {
+    if (!pv.cfg.enabled) return Real(0);
     const float* tbl = (sp_id == PROTON) ? pv.f_p : ((sp_id == NEUTRON) ? pv.f_n : nullptr);
-    if (tbl == nullptr) return 0.0;
+    if (tbl == nullptr) return Real(0);
 
     const int nr = pv.cfg.nr, np = pv.cfg.np;
-    const double ix_f = (x + pv.cfg.r_half_fm) / pv.cfg.dr();
-    const double iy_f = (y + pv.cfg.r_half_fm) / pv.cfg.dr();
-    const double iz_f = (z + pv.cfg.r_half_fm) / pv.cfg.dr();
-    const double ipx_f = (px + pv.cfg.p_half_gev) / pv.cfg.dp();
-    const double ipy_f = (py + pv.cfg.p_half_gev) / pv.cfg.dp();
-    const double ipz_f = (pz + pv.cfg.p_half_gev) / pv.cfg.dp();
+    const Real r_half = static_cast<Real>(pv.cfg.r_half_fm);
+    const Real p_half = static_cast<Real>(pv.cfg.p_half_gev);
+    const Real inv_dr = static_cast<Real>(nr) / (Real(2) * r_half);
+    const Real inv_dp = static_cast<Real>(np) / (Real(2) * p_half);
+    const Real ix_f = (x + r_half) * inv_dr;
+    const Real iy_f = (y + r_half) * inv_dr;
+    const Real iz_f = (z + r_half) * inv_dr;
+    const Real ipx_f = (px + p_half) * inv_dp;
+    const Real ipy_f = (py + p_half) * inv_dp;
+    const Real ipz_f = (pz + p_half) * inv_dp;
 
-    if (ix_f < 0.0 || ix_f >= nr || iy_f < 0.0 || iy_f >= nr || iz_f < 0.0 || iz_f >= nr ||
-        ipx_f < 0.0 || ipx_f >= np || ipy_f < 0.0 || ipy_f >= np || ipz_f < 0.0 || ipz_f >= np) {
-        return 0.0;
+    if (ix_f < Real(0) || ix_f >= Real(nr) || iy_f < Real(0) || iy_f >= Real(nr) || iz_f < Real(0) || iz_f >= Real(nr) ||
+        ipx_f < Real(0) || ipx_f >= Real(np) || ipy_f < Real(0) || ipy_f >= Real(np) || ipz_f < Real(0) || ipz_f >= Real(np)) {
+        return Real(0);
     }
     const int ir = (static_cast<int>(iz_f) * nr + static_cast<int>(iy_f)) * nr + static_cast<int>(ix_f);
     const int ip = (static_cast<int>(ipz_f) * np + static_cast<int>(ipy_f)) * np + static_cast<int>(ipx_f);
-    const double f = static_cast<double>(tbl[ir * (np * np * np) + ip]);
-    return (f < 0.0) ? 0.0 : ((f > 0.98) ? 0.98 : f);
+    const Real f = static_cast<Real>(tbl[ir * (np * np * np) + ip]);
+    return (f < Real(0)) ? Real(0) : ((f > Real(0.98)) ? Real(0.98) : f);
 }
 
 namespace pauli_detail {

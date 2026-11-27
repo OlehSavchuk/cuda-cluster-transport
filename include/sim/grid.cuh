@@ -37,29 +37,34 @@ struct GridView {
     int* cell_start = nullptr;
     int* cell_write_offset = nullptr;
     int* sorted_indices = nullptr;
+    int* active_cells = nullptr;
+    int num_active_cells = 0;
 };
 
 namespace detail {
 
-HD_INLINE double wrap_periodic(double pos, double pmin, double L) {
-    double rel = ::fmod(pos - pmin, L);
-    if (rel < 0.0) rel += L;
-    // Guard against rel == L due to floating-point rounding when pos is tiny negative
-    if (rel >= L) rel = 0.0;
+HD_INLINE Real wrap_periodic(Real pos, Real pmin, Real L) {
+    Real rel = std::fmod(pos - pmin, L);
+    if (rel < Real(0)) rel += L;
+    if (rel >= L) rel = Real(0);
     return pmin + rel;
 }
 
-HD_INLINE int compute_cell_id(double x, double y, double z, const GridConfig& cfg) {
+HD_INLINE int compute_cell_id(Real x, Real y, Real z, const GridConfig& cfg) {
+    const Real xmin = static_cast<Real>(cfg.xmin), xmax = static_cast<Real>(cfg.xmax);
+    const Real ymin = static_cast<Real>(cfg.ymin), ymax = static_cast<Real>(cfg.ymax);
+    const Real zmin = static_cast<Real>(cfg.zmin), zmax = static_cast<Real>(cfg.zmax);
     if (cfg.boundary == BoundaryMode::OpenExpanding) {
-        if (x < cfg.xmin || x >= cfg.xmax ||
-            y < cfg.ymin || y >= cfg.ymax ||
-            z < cfg.zmin || z >= cfg.zmax) {
+        if (x < xmin || x >= xmax || y < ymin || y >= ymax || z < zmin || z >= zmax) {
             return -1;
         }
     }
-    int ix = static_cast<int>(::floor((x - cfg.xmin) / cfg.dx()));
-    int iy = static_cast<int>(::floor((y - cfg.ymin) / cfg.dy()));
-    int iz = static_cast<int>(::floor((z - cfg.zmin) / cfg.dz()));
+    const Real inv_dx = static_cast<Real>(cfg.nx) / (xmax - xmin);
+    const Real inv_dy = static_cast<Real>(cfg.ny) / (ymax - ymin);
+    const Real inv_dz = static_cast<Real>(cfg.nz) / (zmax - zmin);
+    int ix = static_cast<int>(std::floor((x - xmin) * inv_dx));
+    int iy = static_cast<int>(std::floor((y - ymin) * inv_dy));
+    int iz = static_cast<int>(std::floor((z - zmin) * inv_dz));
 
     if (cfg.boundary == BoundaryMode::PeriodicBox) {
         ix = (ix % cfg.nx + cfg.nx) % cfg.nx;
@@ -154,6 +159,17 @@ __global__ void scatter_particles_kernel(ParticleSoAView p, GridView g) {
     }
 }
 
+__global__ void collect_active_cells_kernel(const int* __restrict__ cell_counts,
+                                            int n_cells,
+                                            int* __restrict__ active_cells,
+                                            int* __restrict__ d_num_active) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c < n_cells && cell_counts[c] >= 2) {
+        const int idx = atomicAdd(d_num_active, 1);
+        active_cells[idx] = c;
+    }
+}
+
 #endif  // TRANSPORT_HAS_CUDA
 
 }  // namespace detail
@@ -168,6 +184,9 @@ public:
         cell_counts_.resize(n_cells);
         cell_start_.resize(n_cells);
         cell_write_offset_.resize(n_cells);
+        active_cells_.resize(n_cells > 0 ? n_cells : 1);
+        d_num_active_cells_.resize(1);
+        num_active_cells_ = 0;
 
         const int l1 = (n_cells + 255) / 256;
         const int l2 = (l1 + 255) / 256;
@@ -185,6 +204,7 @@ public:
         }
 
         cell_counts_.zero();
+        num_active_cells_ = 0;
         if (np == 0 || n_cells == 0) {
             cell_start_.zero();
             return;
@@ -208,11 +228,18 @@ public:
 
         detail::scatter_particles_kernel<<<p_blocks, TPB>>>(pview, gview);
         CUDA_CHECK(cudaGetLastError());
+
+        d_num_active_cells_.zero();
+        detail::collect_active_cells_kernel<<<c_blocks, TPB>>>(
+            cell_counts_.data(), n_cells, active_cells_.data(), d_num_active_cells_.data());
+        CUDA_CHECK(cudaGetLastError());
+        d_num_active_cells_.copy_to_host(&num_active_cells_, 1);
 #else
         int* counts = cell_counts_.data();
         int* starts = cell_start_.data();
         int* offsets = cell_write_offset_.data();
         int* sorted = sorted_indices_.data();
+        int* act_cells = active_cells_.data();
 
         for (int i = 0; i < np; ++i) {
             if (!pview.active[i] || pview.freezeout_tag[i] != 0) {
@@ -233,6 +260,7 @@ public:
             starts[c] = running;
             offsets[c] = running;
             running += counts[c];
+            if (counts[c] >= 2) act_cells[num_active_cells_++] = c;
         }
 
         for (int i = 0; i < np; ++i) {
@@ -251,9 +279,12 @@ public:
         gv.cell_start = cell_start_.data();
         gv.cell_write_offset = cell_write_offset_.data();
         gv.sorted_indices = sorted_indices_.data();
+        gv.active_cells = active_cells_.data();
+        gv.num_active_cells = num_active_cells_;
         return gv;
     }
 
+    int num_active_cells() const { return num_active_cells_; }
     const GridConfig& config() const { return cfg_; }
 
 private:
@@ -299,6 +330,9 @@ private:
     DeviceBuffer<int> cell_start_;
     DeviceBuffer<int> cell_write_offset_;
     DeviceBuffer<int> sorted_indices_;
+    DeviceBuffer<int> active_cells_;
+    DeviceBuffer<int> d_num_active_cells_;
+    int num_active_cells_ = 0;
     DeviceBuffer<int> l1_sums_, l1_offsets_;
     DeviceBuffer<int> l2_sums_, l2_offsets_;
 };
