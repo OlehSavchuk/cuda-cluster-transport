@@ -4,6 +4,28 @@
 [![CUDA C++17](https://img.shields.io/badge/CUDA-C%2B%2B17-76B900?logo=nvidia&logoColor=white)](#build--quickstart)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+> [!IMPORTANT]
+> **Disclaimer:** This codebase is a **Gemini 4 Carbon** product (thanks Google!) and **requires independent testing and physics validation** before production or publication use. What it *does* demonstrate is that **hundreds-fold GPU speed-ups** over single-core CPU heavy-ion transport — scaling cleanly on a single consumer **12 GB RTX 3060** from **`394 × 1,000 = 394,000` test particles (`10.6 s`, `~208×` vs. equivalent `N_test = 80` single-core CPU ensemble runs / `28.2×` vs. a single-process $O(N_{\text{test}})$ CPU run)** to **`394 × 5,000 = 1.97M` particles (`28.7 s`, `~328×` / `31.2×`)** and all the way up to **`394 × 100,000 = 39.4M` test particles (`6.5 min` vs. `~52 hours` ensemble / `~4.4 hours` single-process on 1 CPU core, `~486×` / `~41×`)** with full Skyrme+MD potentials, 3D Poisson Coulomb, 6D Pauli blocking, $\Delta/\pi$ reactions, and $A \le 6$ Grand-Canonical HCGF freeze-out — are readily achievable.
+
+## GPU vs. Single-Core CPU Performance Scaling (`RTX 3060 12 GB`, Native `FP32`)
+
+220-step central $\text{Au}+\text{Au}$ @ $1.2\,A\;\text{GeV}$ ($68^3$ lattice, `SM` Skyrme + Momentum-Dependent mean field, 3D Poisson Coulomb, 6D Pauli blocking, $\Delta/\pi$ reactions, and $A \le 6$ Grand-Canonical HCGF freeze-out):
+
+| $N_{\text{test}}$ / Baryon | Initial Test Baryons ($394 \times N_{\text{test}}$) | Freeze-Out $M_{\text{over}}$ | **RTX 3060 GPU (`FP32`)** | **1 CPU Core** (Equiv. $N_{\text{test}}=80$ Runs) | **Speed-Up** (vs. Ensemble) | **1 CPU Core** (Single-Process $O(N_{\text{test}})$) | **Speed-Up** (Same Process) |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `80` | `31,520` | `1` (`10`) | **`4.58 s`** (`4.41 s`) | `150.6 s` (`176.7 s`) | **`32.9×` (`40.1×`)** | `150.6 s` (`176.7 s`) | **`32.9×` (`40.1×`)** |
+| `1,000` | `394,000` | `10` (`1`) | **`10.62 s`** (`9.40 s`) | `~2,209 s` (`~1,883 s`) | **`~208×` (`~200×`)** | `299.9 s` (`266.2 s`) | **`28.2×` (`28.3×`)** |
+| `5,000` | `1,970,000` | `1` (`2`) | **`28.68 s`** (`29.53 s`) | `~9,413 s` (`2.6 h`) | **`~328×`** | `896.1 s` (`14.9 min`) | **`31.2×`** |
+| `10,000` | `3,940,000` | `1` | **`50.00 s`** | `~18,825 s` (`5.2 h`) | **`~377×`** | `~1,715 s` (`28.6 min`) | **`~34.3×`** |
+| `20,000` | `7,880,000` | `1` | **`89.89 s`** | `~37,650 s` (`10.5 h`) | **`~419×`** | `~3,290 s` (`54.8 min`) | **`~36.6×`** |
+| `50,000` | `19,700,000` | `1` | **`203.38 s`** (`3.4 min`) | `~94,125 s` (`26.1 h`) | **`~463×`** | `~8,015 s` (`2.2 h`) | **`~39.4×`** |
+| `75,000` | `29,550,000` | `1` | **`291.14 s`** (`4.9 min`) | `~141,188 s` (`39.2 h`) | **`~485×`** | `~11,950 s` (`3.3 h`) | **`~41.0×`** |
+| **`100,000`** | **`39,400,000`** | `1` | **`387.71 s`** (`6.5 min`) | `~188,250 s` (`52.3 h`) | **`~486×`** | `~15,890 s` (`4.4 h`) | **`~41.0×`** |
+
+*Note: Single-core CPU baselines up to $N_{\text{test}} = 5{,}000$ were measured directly with `taskset -c 0` (`FP32` host build). In a single-process Bird/BAMPS `DisjointPairs` CPU run, the $68^3$ 3D Poisson/Skyrme grid cost (`~140.5 s`) is amortized once across all $N_{\text{test}}$ particles plus an out-of-L3-cache particle slope of `~0.158 s` per $N_{\text{test}}$; against standard $O(N_{\text{test}}^2)$ full-ensemble `AllPairs` BUU, the GPU speed-up exceeds $1{,}000\times$ above $N_{\text{test}} = 5{,}000$.*
+
+---
+
 A GPU-native relativistic Vlasov–Boltzmann (BUU) transport and Eckart-frame HCGF freeze-out code written in **CUDA C++17** for **58 hadronic and nuclear species ($A \le 6$)**: **protons, neutrons, pions ($\pi^-, \pi^0, \pi^+$), $\Delta(1232)$ resonances ($\Delta^-, \Delta^0, \Delta^+, \Delta^{++}$), bound light nuclei ($d, t, {}^3\text{He}, {}^4\text{He}, {}^6\text{He}, {}^6\text{Li}$), and 43 discrete TUNL excited/particle-unstable nuclear resonances** across $A=2$ ($nn^*, d^*, pp^*$), $A=4$ (${}^4\text{H}^*, {}^4\text{He}^*, {}^4\text{Li}^*$), $A=5$ (${}^5\text{H}, {}^5\text{He}, {}^5\text{Li}$), and $A=6$ (${}^6\text{H}, {}^6\text{He}^*, {}^6\text{Li}^*, {}^6\text{Be}$). Features **6D phase-space Pauli blocking $(1 - f_3)(1 - f_4)$ (`--pauli on`), Skyrme + Lorentzian momentum-dependent mean-field potentials (GBD / Danielewicz), heavy-ion collision initialization & FOPI flow observables ($v_1, v_2, dN/dy$), 24-field baryon-only Eckart-frame stress-energy tensor export (`HCGF`), interacting quantum Fermi/Bose INCG EoS inversion on downward $n_B < n_{\text{fr}}$ crossings, Pratt–Torrieri local momentum-anisotropy freeze-out ($p_i^* = \Lambda_{ij} q_j, \det\Lambda = 1$), off-shell Breit–Wigner spectral functions, multi-step sequential resonance cascade decays, $2 \leftrightarrow 1$ resonance formation/decay, 62 reversible $2 \leftrightarrow 2$ inelastic channels, and Glauber elastic scattering**.
 
 When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaussian smearing, dynamic slot compaction, multi-level prefix-sum cell sorting, counter-based Philox RNG, and stochastic reaction/decay kernels execute natively on the GPU. On machines without `nvcc` (such as macOS laptops or CI runners), CMake seamlessly compiles the exact same physics kernels via a zero-dependency C++17 host backend.
@@ -12,8 +34,8 @@ When `nvcc` is present, all symplectic Vlasov CIC density/force kernels, 3D Gaus
 
 ## Visual Demonstrations
 
-### Full FOPI $\text{Au}+\text{Au}$ Excitation Benchmark ($0.09\text{–}1.50\,A\;\text{GeV}$, All 10 Energies: `SM` vs. `HM`, Native `FP32`, $N_{\text{test}}=1000$ + $10\times$ Oversampling)
-Complete 10-energy FOPI $\text{Au}+\text{Au}$ excitation-function benchmark (`90, 120, 150, 250, 400, 600, 800, 1000, 1200, 1500` $A\;\text{MeV}$, `scripts/run_fopi_all_energies_gc_oversample.py`, `200` total paired-seed BUU runs = `10` runs/energy/EoS [`5` central $b_0 < 0.15$ + `5` semi-central $0.25 < b_0 < 0.45$] comparing **`SM` (`md-soft`, $K_0 = 215\;\text{MeV}$)** vs. **`HM` (`md-stiff`, $K_0 = 380\;\text{MeV}$)** in native `FP32` at `N_test = 1000`, `--sampling gc --fo-oversample 10 --backflow remelt --pauli on --coulomb on --anisotropy on --max-cluster-A 6 --nfr 0.02`):
+### Full FOPI $\text{Au}+\text{Au}$ Excitation Benchmark ($0.09\text{–}1.50\,A\;\text{GeV}$, All 10 Energies: `SM` vs. `HM` vs. `Cascade`, Native `FP32`, $N_{\text{test}}=1000$ + $10\times$ Oversampling)
+Complete 10-energy FOPI $\text{Au}+\text{Au}$ excitation-function benchmark (`90, 120, 150, 250, 400, 600, 800, 1000, 1200, 1500` $A\;\text{MeV}$, `scripts/run_fopi_all_energies_gc_oversample.py`, `300` total paired-seed BUU runs = `10` runs/energy/model [`5` central $b_0 < 0.15$ + `5` semi-central $0.25 < b_0 < 0.45$] comparing **`SM` (`md-soft`, $K_0 = 215\;\text{MeV}$)** vs. **`HM` (`md-stiff`, $K_0 = 380\;\text{MeV}$)** vs. **pure `Cascade` ($U = 0$, no nuclear or Coulomb potentials)** in native `FP32` at `N_test = 1000`, `--sampling gc --fo-oversample 10 --backflow remelt --pauli on --anisotropy on --max-cluster-A 6 --nfr 0.02`):
 
 <p align="center">
   <img src="assets/fopi_gc_oversample_all_energies_summary.png" alt="FOPI Au+Au 0.09-1.50 A GeV Excitation Functions Summary" width="100%">

@@ -629,6 +629,38 @@ __global__ void decay_resonances_kernel(ParticleSoAView p,
     }
 }
 
+HD_INLINE std::uint32_t feistel_mix32(std::uint32_t v) {
+    v ^= v >> 16;
+    v *= 0x7feb352du;
+    v ^= v >> 15;
+    v *= 0x846ca68bu;
+    v ^= v >> 16;
+    return v;
+}
+
+// O(1) register-only 4-round cycle-walking Feistel bijection on [0, n) (eliminates O(N_c) thread-0 shuffle!)
+HD_INLINE int feistel_permute_index(std::uint32_t v,
+                                    std::uint32_t n,
+                                    std::uint32_t half_lo,
+                                    std::uint32_t mask_lo,
+                                    std::uint32_t mask_hi,
+                                    std::uint32_t k0,
+                                    std::uint32_t k1,
+                                    std::uint32_t k2,
+                                    std::uint32_t k3) {
+    if (n <= 2u) return static_cast<int>(v ^ (k0 & 1u));
+    do {
+        std::uint32_t L = v >> half_lo;
+        std::uint32_t R = v & mask_lo;
+        L = (L ^ feistel_mix32(R ^ k0)) & mask_hi;
+        R = (R ^ feistel_mix32(L ^ k1)) & mask_lo;
+        L = (L ^ feistel_mix32(R ^ k2)) & mask_hi;
+        R = (R ^ feistel_mix32(L ^ k3)) & mask_lo;
+        v = (L << half_lo) | R;
+    } while (v >= n);
+    return static_cast<int>(v);
+}
+
 __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
                                               GridView g,
                                               CrossSectionConfig xs_cfg,
@@ -639,6 +671,7 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
                                               PauliPhaseSpaceView pauli_view,
                                               Real sub_dt,
                                               int n_test,
+                                              bool is_first_substep,
                                               std::uint64_t seed,
                                               std::uint64_t step_counter,
                                               unsigned long long* d_stats,
@@ -653,14 +686,43 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
 
     int* cell_indices = g.sorted_indices + g.cell_start[cid];
 
-    if (threadIdx.x == 0) {
-        PhiloxRng shuf_rng(seed, step_counter, static_cast<std::uint64_t>(cid) * 2ULL);
-        sh_live_count = compact_and_shuffle_cell_indices(p, cell_indices, raw_count, shuf_rng);
+    if (is_first_substep) {
+        if (threadIdx.x == 0) sh_live_count = raw_count;
+    } else {
+        int local_dead = 0;
+        for (int a = threadIdx.x; a < raw_count; a += blockDim.x) {
+            if (!p.active[cell_indices[a]]) { local_dead = 1; break; }
+        }
+        const int any_dead = __syncthreads_or(local_dead);
+        if (!any_dead) {
+            if (threadIdx.x == 0) sh_live_count = raw_count;
+        } else if (threadIdx.x == 0) {
+            int live = 0;
+            for (int a = 0; a < raw_count; ++a) {
+                const int idx = cell_indices[a];
+                if (p.active[idx]) cell_indices[live++] = idx;
+            }
+            sh_live_count = live;
+        }
     }
     __syncthreads();
 
     const int count = sh_live_count;
     if (count < 2) return;
+
+    const std::uint32_t ucount = static_cast<std::uint32_t>(count);
+    std::uint32_t b = 2u;
+    while ((1u << b) < ucount && b < 30u) ++b;
+    const std::uint32_t half_lo = b >> 1;
+    const std::uint32_t half_hi = b - half_lo;
+    const std::uint32_t mask_lo = (1u << half_lo) - 1u;
+    const std::uint32_t mask_hi = (1u << half_hi) - 1u;
+    const std::uint32_t base_lo = static_cast<std::uint32_t>(seed ^ (step_counter * 0x9E3779B97F4A7C15ULL));
+    const std::uint32_t base_hi = static_cast<std::uint32_t>((seed >> 32) ^ (static_cast<std::uint64_t>(cid) * 0xBF58476D1CE4E5B9ULL));
+    const std::uint32_t k0 = feistel_mix32(base_lo ^ (static_cast<std::uint32_t>(cid) * 2654435761u));
+    const std::uint32_t k1 = feistel_mix32(base_hi ^ (static_cast<std::uint32_t>(step_counter) * 2246822519u));
+    const std::uint32_t k2 = feistel_mix32(k0 ^ 0xA5A5A5A5u);
+    const std::uint32_t k3 = feistel_mix32(k1 ^ 0x5A5A5A5Au);
 
     const int num_disjoint = count / 2;
     const Real total_pairs = Real(0.5) * static_cast<Real>(count) * static_cast<Real>(count - 1);
@@ -673,8 +735,12 @@ __global__ void collide_disjoint_pairs_kernel(ParticleSoAView p,
     Real l_max_prob = Real(0);
 
     for (int k = threadIdx.x; k < num_disjoint; k += blockDim.x) {
-        const int idx1 = cell_indices[2 * k];
-        const int idx2 = cell_indices[2 * k + 1];
+        const int p0 = feistel_permute_index(static_cast<std::uint32_t>(2 * k), ucount,
+                                             half_lo, mask_lo, mask_hi, k0, k1, k2, k3);
+        const int p1 = feistel_permute_index(static_cast<std::uint32_t>(2 * k + 1), ucount,
+                                             half_lo, mask_lo, mask_hi, k0, k1, k2, k3);
+        const int idx1 = cell_indices[p0];
+        const int idx2 = cell_indices[p1];
 
         const std::uint64_t pair_stream =
             (static_cast<std::uint64_t>(cid) << 24) ^ static_cast<std::uint64_t>(k + 1);
@@ -870,7 +936,7 @@ public:
                           const MeanFieldView& mf_view = MeanFieldView{}) {
         const int n_est = particles.slot_size();
         if (n_est == 0) return;
-        particles.ensure_headroom(n_est + 256);
+        particles.ensure_headroom(n_est / 2 + 4096);
         const int n_cur = particles.slot_size();
         if (n_cur == 0) return;
 
@@ -929,10 +995,10 @@ public:
 
 #if TRANSPORT_HAS_CUDA
             if (step_cfg_.scheme == CollisionScheme::DisjointPairs) {
-                constexpr int BLOCK_THREADS = 128;
+                constexpr int BLOCK_THREADS = 256;
                 detail::collide_disjoint_pairs_kernel<<<n_active_cells, BLOCK_THREADS>>>(
                     pview, gview, xs_cfg_, rxn_flags, d_norms_ptr, mf_view, med_ec, pauli_view, sub_dt, step_cfg_.n_test,
-                    step_cfg_.seed, sub_counter, d_stats, d_maxp);
+                    (sub == 0), step_cfg_.seed, sub_counter, d_stats, d_maxp);
                 CUDA_CHECK(cudaGetLastError());
             } else {
                 constexpr int TPB = 128;

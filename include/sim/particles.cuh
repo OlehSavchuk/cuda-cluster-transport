@@ -86,7 +86,7 @@ public:
     explicit ParticleSystem(std::size_t n) : ParticleSystem() { resize_with_headroom(n); }
 
     void resize_with_headroom(std::size_t n_live) {
-        const std::size_t cap = (n_live * 2 + 8192 > capacity_) ? (n_live * 2 + 8192) : capacity_;
+        const std::size_t cap = (n_live * 3 / 2 + 16384 > capacity_) ? (n_live * 3 / 2 + 16384) : capacity_;
         allocate_capacity(cap);
         n_slots_ = static_cast<int>(n_live);
         ++mutation_epoch_;
@@ -97,11 +97,66 @@ public:
         sync_slot_counter_from_device();
         if (n_slots_ + extra_needed <= static_cast<int>(capacity_)) return;
 
-        // Download active particles and re-upload with 2x expanded capacity
+#if TRANSPORT_HAS_CUDA
+        const int live = count_active();
+        const std::size_t needed = static_cast<std::size_t>(live + extra_needed) * 3 / 2 + 16384;
+        const std::size_t new_cap = (needed > capacity_ * 3 / 2 + 16384) ? needed : (capacity_ * 3 / 2 + 16384);
+        compact_on_device_to_capacity(new_cap);
+#else
         auto live = download();
-        const std::size_t new_cap = static_cast<std::size_t>(n_slots_ + extra_needed) * 2 + 8192;
+        const std::size_t new_cap = static_cast<std::size_t>(live.size() + extra_needed) * 3 / 2 + 16384;
         allocate_capacity(new_cap);
         upload(live);
+#endif
+    }
+
+    void bump_mutation_epoch() { ++mutation_epoch_; }
+
+    void append_host(const std::vector<HostParticle>& add) {
+        const std::size_t m = add.size();
+        ++mutation_epoch_;
+        if (m == 0) return;
+        ensure_headroom(static_cast<int>(m) + 64);
+        sync_slot_counter_from_device();
+        const std::size_t off = static_cast<std::size_t>(n_slots_);
+
+        for (auto& v : stage_i_) v.resize(m);
+        for (auto& v : stage_r_) v.resize(m);
+        std::fill_n(stage_i_[0].data(), m, 1);
+        std::fill_n(stage_i_[2].data(), m, -1);
+
+        for (std::size_t i = 0; i < m; ++i) {
+            stage_r_[0][i] = static_cast<Real>(add[i].t);
+            stage_r_[1][i] = static_cast<Real>(add[i].x);
+            stage_r_[2][i] = static_cast<Real>(add[i].y);
+            stage_r_[3][i] = static_cast<Real>(add[i].z);
+            stage_r_[4][i] = static_cast<Real>(add[i].E);
+            stage_r_[5][i] = static_cast<Real>(add[i].px);
+            stage_r_[6][i] = static_cast<Real>(add[i].py);
+            stage_r_[7][i] = static_cast<Real>(add[i].pz);
+            stage_r_[8][i] = static_cast<Real>(add[i].mass);
+            stage_i_[1][i] = add[i].species;
+            stage_i_[3][i] = add[i].collided;
+            stage_i_[4][i] = add[i].freezeout_tag;
+        }
+
+        copy_offset_to_device(active_, stage_i_[0], off, m);
+        copy_offset_to_device(t_, stage_r_[0], off, m);
+        copy_offset_to_device(x_, stage_r_[1], off, m);
+        copy_offset_to_device(y_, stage_r_[2], off, m);
+        copy_offset_to_device(z_, stage_r_[3], off, m);
+        copy_offset_to_device(E_, stage_r_[4], off, m);
+        copy_offset_to_device(px_, stage_r_[5], off, m);
+        copy_offset_to_device(py_, stage_r_[6], off, m);
+        copy_offset_to_device(pz_, stage_r_[7], off, m);
+        copy_offset_to_device(mass_, stage_r_[8], off, m);
+        copy_offset_to_device(species_, stage_i_[1], off, m);
+        copy_offset_to_device(cell_id_, stage_i_[2], off, m);
+        copy_offset_to_device(collided_, stage_i_[3], off, m);
+        copy_offset_to_device(freezeout_tag_, stage_i_[4], off, m);
+
+        n_slots_ += static_cast<int>(m);
+        sync_slot_counter_to_device();
     }
 
     void sync_slot_counter_from_device() {
@@ -241,39 +296,10 @@ public:
         }
 #if TRANSPORT_HAS_CUDA
         const std::size_t new_cap =
-            (static_cast<std::size_t>(live) * 2 + 8192 > capacity_)
-                ? (static_cast<std::size_t>(live) * 2 + 8192)
+            (static_cast<std::size_t>(live) * 3 / 2 + 16384 > capacity_)
+                ? (static_cast<std::size_t>(live) * 3 / 2 + 16384)
                 : capacity_;
-        DeviceBuffer<int> n_act(new_cap), n_sp(new_cap), n_cid(new_cap), n_col(new_cap), n_fr(new_cap);
-        DeviceBuffer<Real> n_t(new_cap), n_x(new_cap), n_y(new_cap), n_z(new_cap);
-        DeviceBuffer<Real> n_E(new_cap), n_px(new_cap), n_py(new_cap), n_pz(new_cap), n_m(new_cap);
-
-        ParticleSoAView dst{};
-        dst.capacity = static_cast<int>(new_cap);
-        dst.active = n_act.data();
-        dst.t = n_t.data(); dst.x = n_x.data(); dst.y = n_y.data(); dst.z = n_z.data();
-        dst.E = n_E.data(); dst.px = n_px.data(); dst.py = n_py.data(); dst.pz = n_pz.data();
-        dst.mass = n_m.data(); dst.species = n_sp.data();
-        dst.cell_id = n_cid.data(); dst.collided = n_col.data();
-        dst.freezeout_tag = n_fr.data();
-
-        d_compact_count_.zero();
-        constexpr int TPB = 256;
-        const int blocks = (n_slots_ + TPB - 1) / TPB;
-        detail::compact_particles_kernel<<<blocks, TPB>>>(view(), dst, d_compact_count_.data());
-        CUDA_CHECK(cudaGetLastError());
-
-        d_compact_count_.copy_to_host(&n_slots_, 1);
-        ++mutation_epoch_;
-        sync_slot_counter_to_device();
-        capacity_ = new_cap;
-
-        active_ = std::move(n_act);
-        t_ = std::move(n_t); x_ = std::move(n_x); y_ = std::move(n_y); z_ = std::move(n_z);
-        E_ = std::move(n_E); px_ = std::move(n_px); py_ = std::move(n_py); pz_ = std::move(n_pz);
-        mass_ = std::move(n_m); species_ = std::move(n_sp);
-        cell_id_ = std::move(n_cid); collided_ = std::move(n_col);
-        freezeout_tag_ = std::move(n_fr);
+        compact_on_device_to_capacity(new_cap);
 #else
         if (static_cast<std::size_t>(live) * 2 + 8192 > capacity_) {
             auto host_live = download();
@@ -362,13 +388,59 @@ private:
 
     template <typename T>
     static void copy_prefix_to_device(DeviceBuffer<T>& dst, const std::vector<T>& src, std::size_t n) {
+        copy_offset_to_device(dst, src, 0, n);
+    }
+
+    template <typename T>
+    static void copy_offset_to_device(DeviceBuffer<T>& dst, const std::vector<T>& src, std::size_t off, std::size_t n) {
         if (n == 0) return;
 #if TRANSPORT_HAS_CUDA
-        CUDA_CHECK(cudaMemcpy(dst.data(), src.data(), n * sizeof(T), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dst.data() + off, src.data(), n * sizeof(T), cudaMemcpyHostToDevice));
 #else
-        std::memcpy(dst.data(), src.data(), n * sizeof(T));
+        std::memcpy(dst.data() + off, src.data(), n * sizeof(T));
 #endif
     }
+
+#if TRANSPORT_HAS_CUDA
+    void compact_on_device_to_capacity(std::size_t new_cap) {
+        DeviceBuffer<int> n_act(new_cap), n_sp(new_cap), n_cid(new_cap), n_col(new_cap), n_fr(new_cap);
+        n_act.zero();
+        n_fr.zero();
+        DeviceBuffer<Real> n_t(new_cap), n_x(new_cap), n_y(new_cap), n_z(new_cap);
+        DeviceBuffer<Real> n_E(new_cap), n_px(new_cap), n_py(new_cap), n_pz(new_cap), n_m(new_cap);
+
+        if (n_slots_ > 0) {
+            ParticleSoAView dst{};
+            dst.capacity = static_cast<int>(new_cap);
+            dst.active = n_act.data();
+            dst.t = n_t.data(); dst.x = n_x.data(); dst.y = n_y.data(); dst.z = n_z.data();
+            dst.E = n_E.data(); dst.px = n_px.data(); dst.py = n_py.data(); dst.pz = n_pz.data();
+            dst.mass = n_m.data(); dst.species = n_sp.data();
+            dst.cell_id = n_cid.data(); dst.collided = n_col.data();
+            dst.freezeout_tag = n_fr.data();
+
+            d_compact_count_.zero();
+            constexpr int TPB = 256;
+            const int blocks = (n_slots_ + TPB - 1) / TPB;
+            detail::compact_particles_kernel<<<blocks, TPB>>>(view(), dst, d_compact_count_.data());
+            CUDA_CHECK(cudaGetLastError());
+            d_compact_count_.copy_to_host(&n_slots_, 1);
+        } else {
+            n_slots_ = 0;
+        }
+
+        ++mutation_epoch_;
+        sync_slot_counter_to_device();
+        capacity_ = new_cap;
+
+        active_ = std::move(n_act);
+        t_ = std::move(n_t); x_ = std::move(n_x); y_ = std::move(n_y); z_ = std::move(n_z);
+        E_ = std::move(n_E); px_ = std::move(n_px); py_ = std::move(n_py); pz_ = std::move(n_pz);
+        mass_ = std::move(n_m); species_ = std::move(n_sp);
+        cell_id_ = std::move(n_cid); collided_ = std::move(n_col);
+        freezeout_tag_ = std::move(n_fr);
+    }
+#endif
 
     int n_slots_ = 0;
     std::size_t capacity_ = 0;

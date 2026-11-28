@@ -472,11 +472,53 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, Real dt,
     if (!do_nuc && !do_coul) return;
 
     const Real x = p.x[i], y = p.y[i], z = p.z[i];
+    int i0, j0, k0;
+    Real wx, wy, wz;
+    if (!cic_weights(x, y, z, mf.gcfg, i0, j0, k0, wx, wy, wz)) return;
+
+    const int ix0 = wrap_or_clamp_idx(i0, mf.gcfg.nx, mf.gcfg.boundary);
+    const int ix1 = wrap_or_clamp_idx(i0 + 1, mf.gcfg.nx, mf.gcfg.boundary);
+    const int iy0 = wrap_or_clamp_idx(j0, mf.gcfg.ny, mf.gcfg.boundary);
+    const int iy1 = wrap_or_clamp_idx(j0 + 1, mf.gcfg.ny, mf.gcfg.boundary);
+    const int iz0 = wrap_or_clamp_idx(k0, mf.gcfg.nz, mf.gcfg.boundary);
+    const int iz1 = wrap_or_clamp_idx(k0 + 1, mf.gcfg.nz, mf.gcfg.boundary);
+
+    const int c000 = cell_flat(ix0, iy0, iz0, mf.gcfg);
+    const int c100 = cell_flat(ix1, iy0, iz0, mf.gcfg);
+    const int c010 = cell_flat(ix0, iy1, iz0, mf.gcfg);
+    const int c110 = cell_flat(ix1, iy1, iz0, mf.gcfg);
+    const int c001 = cell_flat(ix0, iy0, iz1, mf.gcfg);
+    const int c101 = cell_flat(ix1, iy0, iz1, mf.gcfg);
+    const int c011 = cell_flat(ix0, iy1, iz1, mf.gcfg);
+    const int c111 = cell_flat(ix1, iy1, iz1, mf.gcfg);
+
+    const Real mx = Real(1) - wx, my = Real(1) - wy, mz = Real(1) - wz;
+    const Real w000 = mx * my * mz, w100 = wx * my * mz, w010 = mx * wy * mz, w110 = wx * wy * mz;
+    const Real w001 = mx * my * wz, w101 = wx * my * wz, w011 = mx * wy * wz, w111 = wx * wy * wz;
+    const Real inv_dx = static_cast<Real>(mf.gcfg.nx) / static_cast<Real>(mf.gcfg.xmax - mf.gcfg.xmin);
+    const Real inv_dy = static_cast<Real>(mf.gcfg.ny) / static_cast<Real>(mf.gcfg.ymax - mf.gcfg.ymin);
+    const Real inv_dz = static_cast<Real>(mf.gcfg.nz) / static_cast<Real>(mf.gcfg.zmax - mf.gcfg.zmin);
+
+    auto sc_at = [&](const Real* f) -> Real {
+        return w000 * f[c000] + w100 * f[c100] + w010 * f[c010] + w110 * f[c110] +
+               w001 * f[c001] + w101 * f[c101] + w011 * f[c011] + w111 * f[c111];
+    };
+    auto gr_at = [&](const Real* f, Real& gx, Real& gy, Real& gz) {
+        const Real v000 = f[c000], v100 = f[c100], v010 = f[c010], v110 = f[c110];
+        const Real v001 = f[c001], v101 = f[c101], v011 = f[c011], v111 = f[c111];
+        gx = (my * mz * (v100 - v000) + wy * mz * (v110 - v010) +
+              my * wz * (v101 - v001) + wy * wz * (v111 - v011)) * inv_dx;
+        gy = (mx * mz * (v010 - v000) + wx * mz * (v110 - v100) +
+              mx * wz * (v011 - v001) + wx * wz * (v111 - v101)) * inv_dy;
+        gz = (mx * my * (v001 - v000) + wx * my * (v101 - v100) +
+              mx * wy * (v011 - v010) + wx * wy * (v111 - v110)) * inv_dz;
+    };
+
     Real fx = Real(0), fy = Real(0), fz = Real(0);
 
     if (do_coul) {
-        Real gcx = Real(0), gcy = Real(0), gcz = Real(0);
-        sample_cic_grad(mf.phi_coul, x, y, z, mf.gcfg, gcx, gcy, gcz);
+        Real gcx, gcy, gcz;
+        gr_at(mf.phi_coul, gcx, gcy, gcz);
         const Real Q = static_cast<Real>(sp.charge);
         fx -= Q * gcx;
         fy -= Q * gcy;
@@ -488,20 +530,25 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, Real dt,
         get_effective_pn_weights(p.species[i], Z, N);
         const Real A = static_cast<Real>(sp.baryon_num);
 
-        Real gpx = Real(0), gpy = Real(0), gpz = Real(0);
-        Real gnx = Real(0), gny = Real(0), gnz = Real(0);
-        sample_cic_grad(mf.u_loc_p, x, y, z, mf.gcfg, gpx, gpy, gpz);
-        sample_cic_grad(mf.u_loc_n, x, y, z, mf.gcfg, gnx, gny, gnz);
+        Real gpx, gpy, gpz, gnx, gny, gnz;
+        gr_at(mf.u_loc_p, gpx, gpy, gpz);
+        gr_at(mf.u_loc_n, gnx, gny, gnz);
 
         fx += -Z * gpx - N * gnx;
         fy += -Z * gpy - N * gny;
         fz += -Z * gpz - N * gnz;
 
         if (std::fabs(static_cast<Real>(mf.cfg.C_md_gev)) > Real(1.0e-12)) {
-            Real u_loc, pfx, pfy, pfz;
-            sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
+            const Real rho_tot = sc_at(mf.rho_p) + sc_at(mf.rho_n);
+            Real pfx = Real(0), pfy = Real(0), pfz = Real(0);
+            if (rho_tot > Real(1.0e-10)) {
+                const Real inv_r = Real(1) / rho_tot;
+                pfx = sc_at(mf.px_sum) * inv_r;
+                pfy = sc_at(mf.py_sum) * inv_r;
+                pfz = sc_at(mf.pz_sum) * inv_r;
+            }
             Real gmdx, gmdy, gmdz;
-            sample_cic_grad(mf.u_md_dual, x, y, z, mf.gcfg, gmdx, gmdy, gmdz);
+            gr_at(mf.u_md_dual, gmdx, gmdy, gmdz);
 
             const Real inv_A = Real(1) / A;
             const Real qx = p.px[i] * inv_A - pfx;
@@ -515,20 +562,19 @@ HD_INLINE void kick_particle_vlasov(ParticleSoAView& p, int i, Real dt,
             fy += md_coef * gmdy;
             fz += md_coef * gmdz;
 
-            const Real rho_loc = u_loc * static_cast<Real>(mf.cfg.rho0_fm3);
-            if (rho_loc > Real(1.0e-4)) {
-                const Real u_dual = sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
+            if (rho_tot > Real(1.0e-4)) {
+                const Real u_dual = sc_at(mf.u_md_dual);
                 Real grpx, grpy, grpz, grnx, grny, grnz;
-                sample_cic_grad(mf.rho_p, x, y, z, mf.gcfg, grpx, grpy, grpz);
-                sample_cic_grad(mf.rho_n, x, y, z, mf.gcfg, grnx, grny, grnz);
+                gr_at(mf.rho_p, grpx, grpy, grpz);
+                gr_at(mf.rho_n, grnx, grny, grnz);
                 const Real grx = grpx + grnx, gry = grpy + grny, grz = grpz + grnz;
 
                 Real gpix_x, gpix_y, gpix_z, gpiy_x, gpiy_y, gpiy_z, gpiz_x, gpiz_y, gpiz_z;
-                sample_cic_grad(mf.px_sum, x, y, z, mf.gcfg, gpix_x, gpix_y, gpix_z);
-                sample_cic_grad(mf.py_sum, x, y, z, mf.gcfg, gpiy_x, gpiy_y, gpiy_z);
-                sample_cic_grad(mf.pz_sum, x, y, z, mf.gcfg, gpiz_x, gpiz_y, gpiz_z);
+                gr_at(mf.px_sum, gpix_x, gpix_y, gpix_z);
+                gr_at(mf.py_sum, gpiy_x, gpiy_y, gpiy_z);
+                gr_at(mf.pz_sum, gpiz_x, gpiz_y, gpiz_z);
 
-                const Real inv_rho = Real(1) / rho_loc;
+                const Real inv_rho = Real(1) / rho_tot;
                 const Real q_dpf_dx = (qx * (gpix_x - pfx * grx) + qy * (gpiy_x - pfy * grx) + qz * (gpiz_x - pfz * grx)) * inv_rho;
                 const Real q_dpf_dy = (qx * (gpix_y - pfx * gry) + qy * (gpiy_y - pfy * gry) + qz * (gpiz_y - pfz * gry)) * inv_rho;
                 const Real q_dpf_dz = (qx * (gpix_z - pfx * grz) + qy * (gpiy_z - pfy * grz) + qz * (gpiz_z - pfz * grz)) * inv_rho;
@@ -648,6 +694,7 @@ HD_INLINE Real eval_particle_potential_gev(const MeanFieldView& mf,
 }
 
 // Solve omega_3(r3, p3(q)) + omega_4(r4, p4(q)) == omega_target with exact p3(q) + p4(q) == P
+// Precomputes position-only CIC fields once before the 1D secant loop (~16x fewer memory reads per collision!).
 HD_FUNC bool solve_in_medium_2body_momenta(const MeanFieldView& mf,
                                              int id3, Real m3, Real x3, Real y3, Real z3,
                                              int id4, Real m4, Real x4, Real y4, Real z4,
@@ -657,6 +704,38 @@ HD_FUNC bool solve_in_medium_2body_momenta(const MeanFieldView& mf,
                                              Real& E3, Real& p3x, Real& p3y, Real& p3z,
                                              Real& E4, Real& p4x, Real& p4y, Real& p4z) {
     const Real P2 = Px * Px + Py * Py + Pz * Pz;
+    const bool has_md = mf.cfg.enabled && (std::fabs(static_cast<Real>(mf.cfg.C_md_gev)) > Real(1.0e-12));
+    const Real lam = static_cast<Real>(mf.cfg.Lambda_md_gev);
+    const Real inv_lam2 = has_md ? (Real(1) / (lam * lam)) : Real(0);
+
+    auto prep_site = [&](int id, Real x, Real y, Real z,
+                         Real& u_base, Real& a_udual, Real& inv_A, Real& pfx, Real& pfy, Real& pfz) {
+        const SpeciesInfo sp = get_species_info(id);
+        u_base = Real(0); a_udual = Real(0); inv_A = Real(0);
+        pfx = Real(0); pfy = Real(0); pfz = Real(0);
+        if (mf.cfg.coulomb_enabled && sp.charge != 0 && mf.phi_coul != nullptr) {
+            u_base += static_cast<Real>(sp.charge) * sample_cic_scalar(mf.phi_coul, x, y, z, mf.gcfg);
+        }
+        if (!mf.cfg.enabled || sp.baryon_num == 0) return;
+        Real Z = Real(0), N = Real(0);
+        get_effective_pn_weights(id, Z, N);
+        const Real A = static_cast<Real>(sp.baryon_num);
+        u_base += Z * sample_cic_scalar(mf.u_loc_p, x, y, z, mf.gcfg) +
+                  N * sample_cic_scalar(mf.u_loc_n, x, y, z, mf.gcfg);
+        if (has_md) {
+            Real u_loc = Real(0);
+            sample_cic_flow_and_u(mf, x, y, z, u_loc, pfx, pfy, pfz);
+            a_udual = A * sample_cic_scalar(mf.u_md_dual, x, y, z, mf.gcfg);
+            inv_A = Real(1) / A;
+        }
+    };
+
+    Real ub3, aud3, invA3, pfx3, pfy3, pfz3;
+    Real ub4, aud4, invA4, pfx4, pfy4, pfz4;
+    prep_site(id3, x3, y3, z3, ub3, aud3, invA3, pfx3, pfy3, pfz3);
+    prep_site(id4, x4, y4, z4, ub4, aud4, invA4, pfx4, pfy4, pfz4);
+    const Real u_const = ub3 + ub4 - omega_target;
+
     auto eval_q = [&](Real q) -> Real {
         const Real e3s = std::sqrt(m3 * m3 + q * q);
         const Real e4s = std::sqrt(m4 * m4 + q * q);
@@ -671,8 +750,16 @@ HD_FUNC bool solve_in_medium_2body_momenta(const MeanFieldView& mf,
         const Real dE4 = std::sqrt(m4 * m4 + d4x * d4x + d4y * d4y + d4z * d4z);
         E3 = dE3; p3x = d3x; p3y = d3y; p3z = d3z;
         E4 = dE4; p4x = d4x; p4y = d4y; p4z = d4z;
-        return (dE3 + eval_particle_potential_gev(mf, id3, x3, y3, z3, d3x, d3y, d3z)) +
-               (dE4 + eval_particle_potential_gev(mf, id4, x4, y4, z4, d4x, d4y, d4z)) - omega_target;
+        Real u_md = Real(0);
+        if (aud3 != Real(0)) {
+            const Real q3x = d3x * invA3 - pfx3, q3y = d3y * invA3 - pfy3, q3z = d3z * invA3 - pfz3;
+            u_md += aud3 / (Real(1) + (q3x * q3x + q3y * q3y + q3z * q3z) * inv_lam2);
+        }
+        if (aud4 != Real(0)) {
+            const Real q4x = d4x * invA4 - pfx4, q4y = d4y * invA4 - pfy4, q4z = d4z * invA4 - pfz4;
+            u_md += aud4 / (Real(1) + (q4x * q4x + q4y * q4y + q4z * q4z) * inv_lam2);
+        }
+        return dE3 + dE4 + u_const + u_md;
     };
 
     Real q_lo = Real(0), f_lo = eval_q(Real(0));

@@ -256,10 +256,6 @@ inline double solve_hrg_fugacities(double T_gev, double nB_fm3, double Yp, bool 
     return e_sum / std::max(nB_fm3, 1.0e-12);
 }
 
-}  // namespace fo_detail
-
-namespace fo_detail {
-
 inline void invert_local_cluster_eos(double nB_fm3, double Yp, double e_th_gev, bool inc_exc, int max_A,
                                      double& T_gev, double& muB_gev, double& muQ_gev,
                                      double n_eq[NUM_SPECIES], bool quantum_stats = true) {
@@ -402,6 +398,71 @@ inline bool sample_conservative_kbody(const std::vector<int>& sp_ids,
     return true;
 }
 
+struct DevCandParticle {
+    int orig_idx = 0;
+    HostParticle hp{};
+};
+
+#if TRANSPORT_HAS_CUDA
+template <int = 0>
+__global__ void mark_backflow_cells_kernel(ParticleSoAView p, GridConfig gcfg, int nc,
+                                           const float* __restrict__ d_nb, float n_melt,
+                                           std::uint8_t* d_cell_mask) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= p.n || !p.active[i] || p.freezeout_tag[i] == 0) return;
+    if (get_species_info(p.species[i]).baryon_num <= 0) return;
+    const Real xmin = static_cast<Real>(gcfg.xmin), ymin = static_cast<Real>(gcfg.ymin), zmin = static_cast<Real>(gcfg.zmin);
+    const Real inv_dx = static_cast<Real>(gcfg.nx) / static_cast<Real>(gcfg.xmax - gcfg.xmin);
+    const Real inv_dy = static_cast<Real>(gcfg.ny) / static_cast<Real>(gcfg.ymax - gcfg.ymin);
+    const Real inv_dz = static_cast<Real>(gcfg.nz) / static_cast<Real>(gcfg.zmax - gcfg.zmin);
+    const int ix = static_cast<int>(std::floor((p.x[i] - xmin) * inv_dx));
+    const int iy = static_cast<int>(std::floor((p.y[i] - ymin) * inv_dy));
+    const int iz = static_cast<int>(std::floor((p.z[i] - zmin) * inv_dz));
+    if (ix < 0 || ix >= gcfg.nx || iy < 0 || iy >= gcfg.ny || iz < 0 || iz >= gcfg.nz) return;
+    const int c = ix + gcfg.nx * (iy + gcfg.ny * iz);
+    if (c >= 0 && c < nc && d_nb[c] > n_melt) {
+        d_cell_mask[c] = 2;  // Marks cell for backflow/dense extraction (bit 2)
+    }
+}
+
+template <bool Extract>
+__global__ void scan_or_extract_fo_candidates_kernel(ParticleSoAView p, GridConfig gcfg, int nc,
+                                                     const std::uint8_t* __restrict__ d_cell_mask,
+                                                     int* d_count, DevCandParticle* d_out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= p.n || !p.active[i]) return;
+    const SpeciesInfo sp = get_species_info(p.species[i]);
+    if (sp.baryon_num <= 0) return;
+    const Real xmin = static_cast<Real>(gcfg.xmin), ymin = static_cast<Real>(gcfg.ymin), zmin = static_cast<Real>(gcfg.zmin);
+    const Real inv_dx = static_cast<Real>(gcfg.nx) / static_cast<Real>(gcfg.xmax - gcfg.xmin);
+    const Real inv_dy = static_cast<Real>(gcfg.ny) / static_cast<Real>(gcfg.ymax - gcfg.ymin);
+    const Real inv_dz = static_cast<Real>(gcfg.nz) / static_cast<Real>(gcfg.zmax - gcfg.zmin);
+    const int ix = static_cast<int>(std::floor((p.x[i] - xmin) * inv_dx));
+    const int iy = static_cast<int>(std::floor((p.y[i] - ymin) * inv_dy));
+    const int iz = static_cast<int>(std::floor((p.z[i] - zmin) * inv_dz));
+    if (ix < 0 || ix >= gcfg.nx || iy < 0 || iy >= gcfg.ny || iz < 0 || iz >= gcfg.nz) return;
+    const int c = ix + gcfg.nx * (iy + gcfg.ny * iz);
+    if (c < 0 || c >= nc) return;
+    const std::uint8_t m = d_cell_mask[c];
+    if (m == 0) return;
+
+    const bool match_fo = ((m & 1u) != 0u) && (p.freezeout_tag[i] == 0) && (sp.baryon_num == 1);
+    const bool match_bf = ((m & 2u) != 0u);  // sp.baryon_num > 0 already checked above!
+    if (!match_fo && !match_bf) return;
+
+    const int slot = atomicAdd(d_count, 1);
+    if constexpr (Extract) {
+        HostParticle hp;
+        hp.t = p.t[i]; hp.x = p.x[i]; hp.y = p.y[i]; hp.z = p.z[i];
+        hp.E = p.E[i]; hp.px = p.px[i]; hp.py = p.py[i]; hp.pz = p.pz[i];
+        hp.mass = p.mass[i]; hp.species = p.species[i];
+        hp.collided = p.collided[i]; hp.freezeout_tag = p.freezeout_tag[i];
+        d_out[slot] = DevCandParticle{i, hp};
+        p.active[i] = 0;
+    }
+}
+#endif
+
 }  // namespace fo_detail
 
 class FreezeoutCellClusterizer {
@@ -456,28 +517,85 @@ public:
             particles, n_test, gcfg_, mf_cfg, excl_frozen, full_tmunu, static_cast<float>(n_melt));
 
         const double dt_snap = (prev_t_fm_ >= 0.0 && t_fm > prev_t_fm_) ? (t_fm - prev_t_fm_) : 1.0;
-        bool any_candidate_cell = force_finalize;
+        const bool do_bf_check = !force_finalize && snap.has_frozen_particles && snap.has_backflow_candidates &&
+                                 (cfg_.backflow != BackflowMode::GhostFreeStream);
+        if (h_cell_mask_.size() != static_cast<std::size_t>(nc)) {
+            h_cell_mask_.assign(static_cast<std::size_t>(nc), 0);
+        } else {
+            std::fill(h_cell_mask_.begin(), h_cell_mask_.end(), 0);
+        }
+        bool any_fo_cell = false;
         for (int c = 0; c < nc; ++c) {
             const double nb = snap.fields[20][c];
             if (t_fm >= cfg_.peak_track_time_fm && nb > peak_nb_[c]) peak_nb_[c] = nb;
             const double dnb = (prev_t_fm_ >= 0.0) ? ((nb - prev_nb_[c]) / dt_snap) : 0.0;
             dnb_dt_vec_[c] = dnb;
             prev_nb_[c] = nb;
-            if (!any_candidate_cell && t_fm >= cfg_.min_time_fm) {
-                const bool post_sep = (t_fm >= 1.35 * cfg_.min_time_fm) && (nb < cfg_.n_fr_fm3) &&
-                                      (dnb <= 0.0) && (snap.fields[10][c] > 0.0f);
+            if (force_finalize || t_fm >= cfg_.min_time_fm) {
+                const bool post_sep = (t_fm >= 1.35 * cfg_.min_time_fm) && (nb < cfg_.n_fr_fm3) && (dnb <= 0.0);
                 const bool crossed = ((peak_nb_[c] >= cfg_.n_fr_fm3) && (nb < cfg_.n_fr_fm3) && (dnb <= 0.0)) || post_sep;
-                const bool fo_trig = cfg_.require_peak_crossing ? crossed : (nb < cfg_.n_fr_fm3 && snap.fields[10][c] > 0.0f);
-                const bool melt_trig = snap.has_backflow_candidates &&
-                                       (cfg_.backflow != BackflowMode::GhostFreeStream) && (nb > n_melt);
-                if (fo_trig || melt_trig) any_candidate_cell = true;
+                const bool fo_trig = force_finalize || (cfg_.require_peak_crossing ? crossed : (nb < cfg_.n_fr_fm3));
+                if (fo_trig) {
+                    h_cell_mask_[c] = 1;
+                    any_fo_cell = true;
+                }
             }
         }
         prev_t_fm_ = t_fm;
-        if (!force_finalize && (t_fm < cfg_.min_time_fm || !any_candidate_cell)) return snap;
+        if (!force_finalize && t_fm < cfg_.min_time_fm) return snap;
+        if (!any_fo_cell && !do_bf_check) return snap;
 
+#if TRANSPORT_HAS_CUDA
+        std::vector<HostParticle> host_p;
+        {
+            const int np_slots = particles.slot_size();
+            if (np_slots <= 0) return snap;
+            if (d_cell_mask_.size() != static_cast<std::size_t>(nc)) d_cell_mask_.resize(static_cast<std::size_t>(nc));
+            if (d_cand_cnt_.size() == 0) d_cand_cnt_.resize(1);
+            if (d_nb_tmp_.size() != static_cast<std::size_t>(nc)) d_nb_tmp_.resize(static_cast<std::size_t>(nc));
+
+            d_cell_mask_.copy_from_host(h_cell_mask_.data(), static_cast<std::size_t>(nc));
+            constexpr int TPB = 256;
+            const int p_blocks = (np_slots + TPB - 1) / TPB;
+            ParticleSoAView pv = particles.view();
+            if (do_bf_check) {
+                d_nb_tmp_.copy_from_host(snap.fields[20].data(), static_cast<std::size_t>(nc));
+                // Sets bit 2 ONLY on cells actually containing a backflow particle at n_B > n_melt!
+                fo_detail::mark_backflow_cells_kernel<<<p_blocks, TPB>>>(
+                    pv, gcfg_, nc, d_nb_tmp_.data(), static_cast<float>(n_melt), d_cell_mask_.data());
+                CUDA_CHECK(cudaGetLastError());
+            }
+            d_cand_cnt_.zero();
+            fo_detail::scan_or_extract_fo_candidates_kernel<false><<<p_blocks, TPB>>>(
+                pv, gcfg_, nc, d_cell_mask_.data(), d_cand_cnt_.data(), nullptr);
+            CUDA_CHECK(cudaGetLastError());
+            int n_cand = 0;
+            d_cand_cnt_.copy_to_host(&n_cand, 1);
+            if (n_cand <= 0) return snap;
+
+            if (d_cands_.size() < static_cast<std::size_t>(n_cand)) {
+                d_cands_.resize(static_cast<std::size_t>(n_cand) * 3 / 2 + 256);
+            }
+            d_cand_cnt_.zero();
+            fo_detail::scan_or_extract_fo_candidates_kernel<true><<<p_blocks, TPB>>>(
+                pv, gcfg_, nc, d_cell_mask_.data(), d_cand_cnt_.data(), d_cands_.data());
+            CUDA_CHECK(cudaGetLastError());
+            particles.bump_mutation_epoch();
+
+            h_cands_.resize(static_cast<std::size_t>(n_cand));
+            d_cands_.copy_to_host(h_cands_.data(), static_cast<std::size_t>(n_cand));
+            std::sort(h_cands_.begin(), h_cands_.end(),
+                      [](const fo_detail::DevCandParticle& a, const fo_detail::DevCandParticle& b) {
+                          return a.orig_idx < b.orig_idx;
+                      });
+            host_p.resize(static_cast<std::size_t>(n_cand));
+            for (int k = 0; k < n_cand; ++k) host_p[k] = h_cands_[k].hp;
+        }
+#else
         auto host_p = particles.download();
+#endif
         bool mutated = false;
+        (void)mutated;
         std::vector<std::uint8_t> remove_mask(host_p.size(), 0);
         std::vector<HostParticle> spawned;
 
@@ -1074,6 +1192,17 @@ public:
             p0 = p1;
         }
 
+#if TRANSPORT_HAS_CUDA
+        {
+            next_p_.clear();
+            next_p_.reserve(host_p.size() + spawned.size());
+            for (std::size_t i = 0; i < host_p.size(); ++i) {
+                if (!remove_mask[i]) next_p_.push_back(host_p[i]);
+            }
+            for (const auto& sp : spawned) next_p_.push_back(sp);
+            particles.append_host(next_p_);
+        }
+#else
         if (mutated) {
             next_p_.clear();
             next_p_.reserve(host_p.size() + spawned.size());
@@ -1083,6 +1212,7 @@ public:
             for (const auto& sp : spawned) next_p_.push_back(sp);
             particles.upload(next_p_);
         }
+#endif
         return snap;
     }
 
@@ -1118,6 +1248,14 @@ private:
     std::vector<std::vector<std::size_t>> dense_nucleons_, back_clusters_, cell_baryons_;
     std::vector<int> touched_dn_, touched_bc_, touched_cb_;
     std::vector<HostParticle> next_p_;
+    std::vector<std::uint8_t> h_cell_mask_;
+#if TRANSPORT_HAS_CUDA
+    DeviceBuffer<std::uint8_t> d_cell_mask_;
+    DeviceBuffer<int> d_cand_cnt_;
+    DeviceBuffer<float> d_nb_tmp_;
+    DeviceBuffer<fo_detail::DevCandParticle> d_cands_;
+    std::vector<fo_detail::DevCandParticle> h_cands_;
+#endif
     double prev_t_fm_ = -1.0;
     std::vector<FreezeoutCellRecord> records_;
     long long total_baryons_converted_ = 0;
